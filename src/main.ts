@@ -40,20 +40,18 @@ controls.mouseButtons = {
 };
 
 let field = new ParticleField(settings.particleCount);
-await field.init(renderer);
 scene.add(field.mesh);
 
-async function setParticleCount(count: number): Promise<void> {
+function setParticleCount(count: number): void {
   scene.remove(field.mesh);
   field.dispose();
   field = new ParticleField(count);
-  await field.init(renderer);
   scene.add(field.mesh);
 }
 
 const audio = new AudioEngine();
 const interaction = new Interaction(camera, state, renderer.domElement);
-createPanel(state, interaction, settings, (count) => void setParticleCount(count));
+createPanel(state, interaction, settings, setParticleCount);
 
 document.body.appendChild(XRButton.createButton(renderer));
 
@@ -78,6 +76,9 @@ Object.assign(window, { __ocean: { state, audio, renderer, get field() { return 
 console.log('[ocean] backend:', renderer.backend.constructor.name);
 
 // --- main loop ---
+// the shared clock: both the GPU field and the audio worklet render the
+// same deterministic flash process on this timeline
+const epoch = performance.now();
 let frameLogged = false;
 let last = performance.now();
 renderer.setAnimationLoop((now: number) => {
@@ -87,6 +88,7 @@ renderer.setAnimationLoop((now: number) => {
   }
   const dt = Math.min((now - last) / 1000, 1 / 20);
   last = now;
+  const tSec = (performance.now() - epoch) / 1000;
 
   fpsEma = fpsEma * 0.95 + (dt > 0 ? 1 / dt : 0) * 0.05;
   statsTimer += dt;
@@ -100,12 +102,8 @@ renderer.setAnimationLoop((now: number) => {
   }
 
   interaction.update(dt);
-  field.update(renderer, state);
-  audio.updateParams(state, now);
-  // literal identity: read real particle states back, hand them to voices
-  void field.readSonics(renderer).then((sonics) => {
-    if (sonics) audio.updateVoices(sonics, field.sonicStride, camera, state);
-  });
+  field.update(state, tSec);
+  audio.update(state, camera, tSec, field.sonicStride);
   controls.update();
 
   renderer.render(scene, camera);

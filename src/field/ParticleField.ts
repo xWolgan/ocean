@@ -1,16 +1,11 @@
 import * as THREE from 'three/webgpu';
 import {
-  Fn,
   uniform,
-  instancedArray,
   instanceIndex,
   hash,
-  time,
-  deltaTime,
   uint,
   float,
   vec3,
-  vec4,
   uv,
   mix,
   clamp,
@@ -19,34 +14,40 @@ import {
   step,
   fract,
   floor,
-  sin,
-  exp,
-  mod,
-  mx_fractal_noise_vec3,
 } from 'three/tsl';
 import type { FieldState } from '../state/FieldState';
 import { FIELD_CENTER, FIELD_HALF_EXTENTS } from '../state/FieldState';
 
-function toF32(raw: ArrayBuffer | Uint8Array): Float32Array {
-  const u8 = raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw;
-  return new Float32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4);
-}
-
 /**
- * The substance, visual rendering: a GPU-simulated cloud of particles.
- * Pure state = spatial TV noise (independent wander + flicker + churn of
- * births and deaths). The attractor condenses particles onto a spherical
- * shell and raises their local `order`; ordered matter flows coherently,
- * goes still, brightens and stops flickering — noise becoming form.
+ * The substance, v3: a stochastic point process rendered twice.
+ *
+ * A particle is a FLASH — born, alive for 1..100 ms, gone. The whole field
+ * is a pure, stateless function of time built from PCG hashes: particle i
+ * in generation g spawns at hash(i,g)-derived position, lives
+ * tau*(0.5+hash(i)) seconds, dies, respawns. No simulation state exists;
+ * the GPU evaluates this function per frame, and the audio worklet
+ * evaluates the SAME function sample-accurately for a strided sample of
+ * particles. Two renderings of one deterministic stochastic process —
+ * no readback, no latency, no drift in meaning.
+ *
+ * The attractor is an oscillator: particles whose pool lottery falls
+ * under its strength leave their private phase and lock onto a shared
+ * clock at rate 1/tau, respawning together AT the attractor. Order is
+ * synchronization: free phases = noise, locked phases = pulse train =
+ * visual glow + audible pitch (flicker fusion and pitch fusion are the
+ * same threshold in two senses).
  */
-/** Number of particles whose actual state is read back each frame and
- *  given a literal audio voice. */
+
+/** Number of particles the audio engine samples (mirrors these hashes). */
 export const SONIC_COUNT = 256;
 
+/** Fraction of all particles the attractor may capture at full strength. */
+export const POOL_FRACTION = 0.04;
+
 /**
- * Bit-exact JS replica of TSL's hash() (PCG, pcg-random.org) — used to
- * recompute per-particle constants (color band, density lottery) on the
- * main thread so the GPU readback only needs dynamic state.
+ * Bit-exact JS replica of TSL's hash() (PCG, pcg-random.org). The audio
+ * worklet uses the same function so both renderings agree on every
+ * particle's lifetime, phase, position, color band and lotteries.
  */
 export function pcgHash(n: number): number {
   const state = (Math.imul(n, 747796405) + 2891336453) >>> 0;
@@ -58,35 +59,23 @@ export class ParticleField {
   readonly count: number;
   readonly mesh: THREE.Sprite;
 
-  private readonly computeInit: THREE.ComputeNode;
-  private readonly computeUpdate: THREE.ComputeNode;
-  private readonly computeSonics: THREE.ComputeNode;
-  private readonly sonicsAttribute: THREE.BufferAttribute;
-  private sonicsInFlight = false;
-  private sonicsFrameCounter = 0;
-  private sonicsInterval = 2; // frames between readbacks; adapts to cost
-
   /** Particle-buffer index step between consecutive sonic samples. */
   readonly sonicStride: number;
 
+  private readonly uTime = uniform(0);
   private readonly uDensity = uniform(0.5);
+  private readonly uTau = uniform(0.02);
   private readonly uSpeed = uniform(0.5);
   private readonly uSize = uniform(0.02);
   private readonly uTint = uniform(new THREE.Vector3(0.75, 0.78, 0.85));
   private readonly uColorRandom = uniform(0.5);
-  /** Mean lifetime in seconds (mapped from the 0..1 lifespan param). */
-  private readonly uLifetime = uniform(8);
   private readonly uAttractorPos = uniform(new THREE.Vector3(0, 1.5, 0));
   private readonly uAttractorRadius = uniform(1.0);
   private readonly uAttractorStrength = uniform(0.0);
 
   constructor(count: number) {
     this.count = count;
-
-    const positions = instancedArray(count, 'vec3');
-    const velocities = instancedArray(count, 'vec3');
-    const orders = instancedArray(count, 'float');
-    const ages = instancedArray(count, 'float');
+    this.sonicStride = Math.max(1, Math.floor(count / SONIC_COUNT));
 
     const boundsMin = vec3(
       FIELD_CENTER.x - FIELD_HALF_EXTENTS.x,
@@ -99,155 +88,81 @@ export class ParticleField {
       FIELD_HALF_EXTENTS.z * 2,
     );
 
-    // per-particle lifetime = mean lifetime * (0.5 + u_i), u_i stable random;
-    // shared between compute (death) and render (birth/death fade)
-    const lifeJitter = hash(instanceIndex.add(uint(808))).add(0.5);
-    const lifetime = this.uLifetime.mul(lifeJitter);
+    const i = instanceIndex;
+    // 2D hash over (particle, generation, salt) — MUST match the worklet:
+    // pcg(i*1009 + g*9176 + salt), uint32 wraparound.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const h2 = (g: any, salt: number) =>
+      hash(i.mul(uint(1009)).add(g.toUint().mul(uint(9176))).add(uint(salt)));
 
-    this.computeInit = Fn(() => {
-      const position = positions.element(instanceIndex);
-      const velocity = velocities.element(instanceIndex);
-      const order = orders.element(instanceIndex);
-      const age = ages.element(instanceIndex);
+    // --- free timeline: private lifetime and phase per particle ---
+    const lifeJitter = hash(i.add(uint(808))).add(0.5);
+    const L = this.uTau.mul(lifeJitter);
+    const x = this.uTime.div(L).add(hash(i.add(uint(909))));
+    const g = floor(x);
+    const a = fract(x); // age fraction 0..1 within current generation
 
-      const r = vec3(
-        hash(instanceIndex),
-        hash(instanceIndex.add(uint(101))),
-        hash(instanceIndex.add(uint(202))),
-      );
-      position.assign(boundsMin.add(r.mul(boundsSize)));
-      velocity.assign(vec3(0));
-      order.assign(0);
-      // stagger ages so the initial population doesn't die in one wave
-      age.assign(hash(instanceIndex.add(uint(909))).mul(lifetime));
-    })().compute(count);
+    const freePos = boundsMin.add(
+      vec3(h2(g, 101), h2(g, 202), h2(g, 331)).mul(boundsSize),
+    );
+    const aliveFree = step(h2(g, 303), this.uDensity);
+    // brief linear drift over the flash's life — the speed of the substance
+    const drift = vec3(h2(g, 555), h2(g, 666), h2(g, 777))
+      .sub(0.5)
+      .mul(this.uSpeed.mul(3))
+      .mul(a)
+      .mul(L);
 
-    this.computeUpdate = Fn(() => {
-      const position = positions.element(instanceIndex);
-      const velocity = velocities.element(instanceIndex);
-      const order = orders.element(instanceIndex);
-      const age = ages.element(instanceIndex);
+    // --- locked timeline: the attractor's shared clock at rate 1/tau ---
+    const xL = this.uTime.div(this.uTau);
+    const aL = fract(xL);
+    const poolRoll = hash(i.add(uint(747)));
+    const captured = step(poolRoll, this.uAttractorStrength.mul(POOL_FRACTION));
+    // frozen randomness: the captured cloud keeps the SAME shape every
+    // cycle (no generation in the hash) — order is repetition, and its
+    // audio twin replays the same frozen-noise waveform each cycle
+    const capturedDir = vec3(
+      hash(i.add(uint(761))),
+      hash(i.add(uint(862))),
+      hash(i.add(uint(963))),
+    )
+      .sub(0.5)
+      .add(0.0001)
+      .normalize();
+    const capturedRad = hash(i.add(uint(964)))
+      .pow(1 / 3)
+      .mul(this.uAttractorRadius.mul(0.5));
+    const capturedPos = this.uAttractorPos.add(capturedDir.mul(capturedRad));
 
-      const dt = deltaTime.min(1 / 30);
-
-      // --- mortality: constant population, tunable turnover ---
-      age.addAssign(dt);
-      const reborn = step(lifetime, age); // 1 when this particle's time is up
-      const rseed = fract(time.mul(0.618034)).mul(977.0);
-      const newPos = boundsMin.add(
-        vec3(
-          hash(instanceIndex.toFloat().add(rseed)),
-          hash(instanceIndex.toFloat().add(rseed.add(31.7))),
-          hash(instanceIndex.toFloat().add(rseed.add(77.3))),
-        ).mul(boundsSize),
-      );
-      position.assign(mix(position, newPos, reborn));
-      velocity.assign(mix(velocity, vec3(0), reborn));
-      order.assign(mix(order, float(0), reborn));
-      age.assign(mix(age, float(0), reborn));
-
-      // --- motion ---
-      // Disordered particles sample the flow field at decorrelated points
-      // (independent, crackling motion); ordered particles converge onto
-      // the same coherent flow.
-      const pid = hash(instanceIndex);
-      const pid2 = hash(instanceIndex.add(uint(7)));
-      const decorrelation = float(1).sub(order).mul(8);
-      const samplePos = position
-        .mul(0.9)
-        .add(vec3(pid.mul(decorrelation), pid2.mul(decorrelation), time.mul(0.35)));
-      const wander = mx_fractal_noise_vec3(samplePos, 2).mul(this.uSpeed.mul(2.4));
-
-      // The attractor condenses matter onto a spherical shell: a shape
-      // emerging locally from the noise.
-      const toP = position.sub(this.uAttractorPos);
-      const dist = length(toP).max(0.0001);
-      const influence = smoothstep(float(0.15), float(1.0), dist.div(this.uAttractorRadius))
-        .oneMinus()
-        .mul(this.uAttractorStrength);
-      const shellTarget = this.uAttractorPos.add(
-        toP.div(dist).mul(this.uAttractorRadius.mul(0.45)),
-      );
-      const condense = shellTarget.sub(position).mul(influence).mul(6);
-
-      // Local order relaxes toward the attractor influence — order is
-      // created by modulation, never a property of the substance itself.
-      order.assign(mix(order, clamp(influence, 0, 1), clamp(dt.mul(4), 0, 1)));
-      const stillness = float(1).sub(order.mul(0.9));
-
-      const damping = exp(dt.mul(-3));
-      velocity.assign(velocity.mul(damping).add(wander.mul(stillness).add(condense).mul(dt)));
-      position.addAssign(velocity.mul(dt));
-
-      // Toroidal wrap keeps the noise field continuous.
-      const local = position.sub(boundsMin).add(boundsSize);
-      position.assign(boundsMin.add(mod(local, boundsSize)));
-    })().compute(count);
-
-    // --- sonics: a strided sample of REAL particles, read back regularly,
-    // each owning a literal audio voice. A single vec4 per particle, one
-    // write per thread (the WebGL2 compute fallback can't do more):
-    // [x, y, z, packed] with packed = floor(order*255)*2 + lifeEnv.
-    // Static per-particle values (color band, density lottery) are
-    // recomputed on the main thread via pcgHash — same PCG as TSL hash.
-    const sonics = instancedArray(SONIC_COUNT, 'vec4');
-    this.sonicsAttribute = sonics.value;
-    this.sonicStride = Math.max(1, Math.floor(count / SONIC_COUNT));
-
-    this.computeSonics = Fn(() => {
-      const src = instanceIndex.mul(uint(this.sonicStride));
-      const position = positions.element(src);
-      const order = orders.element(src);
-      const age = ages.element(src);
-
-      const srcLifetime = this.uLifetime.mul(hash(src.add(uint(808))).add(0.5));
-      const frac = clamp(age.div(srcLifetime), 0, 1);
-      const lifeEnv = smoothstep(0.0, 0.08, frac)
-        .mul(smoothstep(1.0, 0.8, frac))
-        .clamp(0, 0.999);
-      const packed = floor(clamp(order, 0, 1).mul(255)).mul(2).add(lifeEnv);
-
-      sonics.element(instanceIndex).assign(vec4(position, packed));
-    })().compute(SONIC_COUNT);
+    // --- choose timeline per particle ---
+    // captured flashes articulate with a duty gap, like their audio twin
+    const age = mix(a, aL.div(0.6), captured);
+    const alive = mix(aliveFree, float(1), captured);
+    const position = mix(freePos.add(drift), capturedPos, captured);
+    const env = clamp(age.mul(float(1).sub(age)).mul(4), 0, 1); // cheap Hann
 
     // --- rendering ---
-
     const material = new THREE.SpriteNodeMaterial();
     material.blending = THREE.AdditiveBlending;
     material.depthWrite = false;
     material.transparent = true;
 
-    material.positionNode = positions.toAttribute();
-    const orderAttr = orders.toAttribute();
-    const ageAttr = ages.toAttribute();
+    material.positionNode = position;
 
-    // density culls by per-particle lottery: the substance thins to emptiness
-    const alive = step(hash(instanceIndex.add(uint(303))), this.uDensity);
+    const sizeJitter = hash(i.add(uint(404))).mul(0.7).add(0.5);
+    material.scaleNode = this.uSize.mul(sizeJitter).mul(alive).mul(env);
 
-    // birth/death envelope: particles twinkle into and out of existence
-    const ageFrac = clamp(ageAttr.div(lifetime), 0, 1);
-    const lifeEnv = smoothstep(0.0, 0.08, ageFrac).mul(
-      smoothstep(1.0, 0.8, ageFrac),
-    );
-
-    const sizeJitter = hash(instanceIndex.add(uint(404))).mul(0.7).add(0.5);
-    material.scaleNode = this.uSize.mul(sizeJitter).mul(alive).mul(lifeEnv);
-
-    // TV flicker at ~24Hz; ordered particles settle into steady light
-    const flick = fract(
-      sin(floor(time.mul(24)).add(hash(instanceIndex).mul(1113))).mul(43758.55),
-    );
-    const brightness = mix(flick, float(0.95), orderAttr.mul(0.8)).mul(0.85).add(0.15);
-
-    // color: uniform tint <-> fully random per-particle values;
-    // ordered matter brightens but keeps its hue
+    // color: uniform tint <-> fully random per-particle values; a particle
+    // keeps its color band across generations (its identity thread, and
+    // its filter band in the audio twin)
     const randomColor = vec3(
-      hash(instanceIndex.add(uint(601))),
-      hash(instanceIndex.add(uint(602))),
-      hash(instanceIndex.add(uint(603))),
+      hash(i.add(uint(601))),
+      hash(i.add(uint(602))),
+      hash(i.add(uint(603))),
     );
     const col = mix(this.uTint, randomColor, this.uColorRandom);
-    material.colorNode = col.mul(brightness).mul(orderAttr.mul(0.8).add(1));
+    const brightness = env.mul(0.75).add(0.25);
+    material.colorNode = col.mul(brightness).mul(captured.mul(0.8).add(1));
 
     const d = length(uv().sub(0.5));
     material.opacityNode = smoothstep(0.12, 0.5, d).oneMinus().mul(0.85);
@@ -257,48 +172,27 @@ export class ParticleField {
     this.mesh.frustumCulled = false;
   }
 
-  async init(renderer: THREE.WebGPURenderer): Promise<void> {
-    await renderer.computeAsync(this.computeInit);
-  }
-
-  update(renderer: THREE.WebGPURenderer, state: FieldState): void {
+  /** tSec is the shared global clock (also sent to the audio worklet). */
+  update(state: FieldState, tSec: number): void {
+    this.uTime.value = tSec;
     this.uDensity.value = state.density;
+    this.uTau.value = lifespanToTau(state.lifespan);
     this.uSpeed.value = state.speed;
     this.uSize.value = 0.006 + state.scale * 0.045;
     this.uTint.value.set(state.tint.r, state.tint.g, state.tint.b);
     this.uColorRandom.value = state.colorRandom;
-    // 0..1 -> ~0.3s .. ~30s mean lifetime
-    this.uLifetime.value = 0.3 * Math.pow(100, state.lifespan);
     this.uAttractorPos.value.copy(state.attractor.position);
     this.uAttractorRadius.value = state.attractor.radius;
     this.uAttractorStrength.value = state.attractor.strength;
-
-    renderer.compute(this.computeUpdate);
-  }
-
-  /**
-   * Sample the real particle states for the audio voices. Internally
-   * paced: skips while a readback is in flight, runs at most every
-   * `sonicsInterval` frames, and backs off when readback is expensive
-   * (software GL stalls hard on synchronous buffer reads).
-   */
-  async readSonics(renderer: THREE.WebGPURenderer): Promise<Float32Array | null> {
-    if (this.sonicsInFlight) return null;
-    if (++this.sonicsFrameCounter < this.sonicsInterval) return null;
-    this.sonicsFrameCounter = 0;
-    this.sonicsInFlight = true;
-    const t0 = performance.now();
-    try {
-      renderer.compute(this.computeSonics);
-      return toF32(await renderer.getArrayBufferAsync(this.sonicsAttribute));
-    } finally {
-      this.sonicsInFlight = false;
-      const cost = performance.now() - t0;
-      this.sonicsInterval = cost > 6 ? Math.min(12, this.sonicsInterval + 1) : 2;
-    }
   }
 
   dispose(): void {
     (this.mesh.material as THREE.Material).dispose();
   }
+}
+
+/** lifespan 0..1 -> mean flash duration 1ms..100ms. The attractor's pitch
+ *  is 1/tau: 1000 Hz at the short end, a 10 Hz pulse at the long end. */
+export function lifespanToTau(lifespan: number): number {
+  return 0.001 * Math.pow(10, 2 * lifespan);
 }
