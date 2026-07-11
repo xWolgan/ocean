@@ -63,6 +63,7 @@ export class ParticleField {
   readonly sonicStride: number;
 
   private readonly uTime = uniform(0);
+  private readonly uDeltaTime = uniform(1 / 60);
   private readonly uDensity = uniform(0.5);
   private readonly uTau = uniform(0.02);
   private readonly uSpeed = uniform(0.5);
@@ -95,27 +96,32 @@ export class ParticleField {
     const h2 = (g: any, salt: number) =>
       hash(i.mul(uint(1009)).add(g.toUint().mul(uint(9176))).add(uint(salt)));
 
-    // --- free timeline: private lifetime and phase per particle ---
-    const lifeJitter = hash(i.add(uint(808))).add(0.5);
-    const L = this.uTau.mul(lifeJitter);
-    const x = this.uTime.div(L).add(hash(i.add(uint(909))));
-    const g = floor(x);
-    const a = fract(x); // age fraction 0..1 within current generation
+    // --- free timeline: a renewal process, not a train. Each slot gets a
+    // re-rolled burst duration and a random offset, leaving a silent gap:
+    // fixed repetition intervals are unearned order (they buzz), and
+    // periodicity is the attractor's monopoly.
+    const slotPeriod = this.uTau.mul(hash(i.add(uint(808))).add(0.5)).mul(1.8);
+    const xs = this.uTime.div(slotPeriod).add(hash(i.add(uint(909))));
+    const slot = floor(xs);
+    const tLoc = fract(xs); // 0..1 within current slot
+    const durN = h2(slot, 222).mul(0.4).add(0.35); // burst = 35..75% of slot
+    const offN = h2(slot, 111).mul(float(1).sub(durN));
+    const a = clamp(tLoc.sub(offN).div(durN), 0, 1); // burst-local age
+    const inBurst = step(offN, tLoc).mul(step(tLoc, offN.add(durN)));
 
     const freePos = boundsMin.add(
-      vec3(h2(g, 101), h2(g, 202), h2(g, 331)).mul(boundsSize),
+      vec3(h2(slot, 101), h2(slot, 202), h2(slot, 331)).mul(boundsSize),
     );
-    const aliveFree = step(h2(g, 303), this.uDensity);
+    const aliveFree = step(h2(slot, 303), this.uDensity).mul(inBurst);
     // brief linear drift over the flash's life — the speed of the substance
-    const drift = vec3(h2(g, 555), h2(g, 666), h2(g, 777))
+    const drift = vec3(h2(slot, 555), h2(slot, 666), h2(slot, 777))
       .sub(0.5)
       .mul(this.uSpeed.mul(3))
       .mul(a)
-      .mul(L);
+      .mul(slotPeriod.mul(durN));
 
     // --- locked timeline: the attractor's shared clock at rate 1/tau ---
     const xL = this.uTime.div(this.uTau);
-    const aL = fract(xL);
     const poolRoll = hash(i.add(uint(747)));
     const captured = step(poolRoll, this.uAttractorStrength.mul(POOL_FRACTION));
     // frozen randomness: the captured cloud keeps the SAME shape every
@@ -135,11 +141,29 @@ export class ParticleField {
     const capturedPos = this.uAttractorPos.add(capturedDir.mul(capturedRad));
 
     // --- choose timeline per particle ---
-    // captured flashes articulate with a duty gap, like their audio twin
-    const age = mix(a, aL.div(0.6), captured);
-    const alive = mix(aliveFree, float(1), captured);
     const position = mix(freePos.add(drift), capturedPos, captured);
-    const env = clamp(age.mul(float(1).sub(age)).mul(4), 0, 1); // cheap Hann
+
+    // free burst envelope: sampled per frame — random phases make display
+    // aliasing read as sparkle, which IS the noise aesthetic
+    const envFree = a.mul(float(1).sub(a)).mul(4).mul(aliveFree);
+
+    // captured envelope: the frame is a camera EXPOSURE, not a sample.
+    // Analytic mean of the duty-0.6 parabola pulse over [t, t+dt] — exact
+    // across any number of pulses, so the coherent cloud cannot strobe
+    // against the refresh rate (which does not belong to this universe).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pulseIntegral = (x: any) => {
+      const u = clamp(fract(x).div(0.6), 0, 1);
+      return floor(x)
+        .mul(0.4)
+        .add(u.mul(u).mul(float(2).sub(u.mul(4 / 3))).mul(0.6));
+    };
+    const x1 = xL.add(this.uDeltaTime.div(this.uTau));
+    const meanEnvCap = pulseIntegral(x1)
+      .sub(pulseIntegral(xL))
+      .div(x1.sub(xL).max(1e-6));
+
+    const bright = mix(envFree, meanEnvCap, captured);
 
     // --- rendering ---
     const material = new THREE.SpriteNodeMaterial();
@@ -149,8 +173,12 @@ export class ParticleField {
 
     material.positionNode = position;
 
+    // size is constant during a burst — the flash lives in the light, not
+    // the geometry; free bursts gate on/off, captured stay lit and pulse
     const sizeJitter = hash(i.add(uint(404))).mul(0.7).add(0.5);
-    material.scaleNode = this.uSize.mul(sizeJitter).mul(alive).mul(env);
+    material.scaleNode = this.uSize
+      .mul(sizeJitter)
+      .mul(mix(aliveFree, float(1), captured));
 
     // color: uniform tint <-> fully random per-particle values; a particle
     // keeps its color band across generations (its identity thread, and
@@ -161,8 +189,9 @@ export class ParticleField {
       hash(i.add(uint(603))),
     );
     const col = mix(this.uTint, randomColor, this.uColorRandom);
-    const brightness = env.mul(0.75).add(0.25);
-    material.colorNode = col.mul(brightness).mul(captured.mul(0.8).add(1));
+    material.colorNode = col
+      .mul(bright.mul(0.9).add(0.05))
+      .mul(captured.mul(0.8).add(1));
 
     const d = length(uv().sub(0.5));
     material.opacityNode = smoothstep(0.12, 0.5, d).oneMinus().mul(0.85);
@@ -173,8 +202,9 @@ export class ParticleField {
   }
 
   /** tSec is the shared global clock (also sent to the audio worklet). */
-  update(state: FieldState, tSec: number): void {
+  update(state: FieldState, tSec: number, dtSec: number): void {
     this.uTime.value = tSec;
+    this.uDeltaTime.value = Math.max(dtSec, 1 / 240);
     this.uDensity.value = state.density;
     this.uTau.value = lifespanToTau(state.lifespan);
     this.uSpeed.value = state.speed;

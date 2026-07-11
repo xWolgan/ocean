@@ -78,7 +78,7 @@ function rgbToHsv(r, g, b) {
 class Voice {
   constructor(index) {
     this.i = index; // real particle index
-    this.lifeJitter = 0.5 + pcg(index + 808); // free-timeline lifetime jitter
+    this.slotJitter = 0.5 + pcg(index + 808); // free-timeline slot-period jitter
     this.phi = pcg(index + 909); // free-timeline phase
     this.poolRoll = pcg(index + 747); // attractor pool lottery
     this.sizeJitter = pcg(index + 404) * 0.7 + 0.5; // same as GPU size jitter
@@ -92,13 +92,15 @@ class Voice {
     this.tableB = 0;
     this.tableFrac = 0;
 
-    // per-generation state
+    // per-slot/generation state
     this.gen = -1e18;
     this.capturedNow = false;
     this.amp = 0;
     this.panL = 0.7;
     this.panR = 0.7;
     this.phase = 0;
+    this.offN = 0; // burst offset within slot (fraction)
+    this.durN = 0.5; // burst duration within slot (fraction)
   }
 }
 
@@ -128,6 +130,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.blockCounter = 0;
     this.paramsDirty = true;
     this.attSpat = [0, 0];
+    // rumble-blocker high-pass state
+    this.hpXL = 0;
+    this.hpXR = 0;
+    this.hpYL = 0;
+    this.hpYR = 0;
+    this.hpR = 1 - (2 * Math.PI * 35) / sampleRate;
 
     this.port.onmessage = (e) => {
       if (e.data.type === 'params') {
@@ -202,6 +210,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       v.panL = gL / mag;
       v.panR = gR / mag;
     } else {
+      // renewal process, matching the GPU: re-rolled burst duration and a
+      // random offset in each slot — no fixed repetition interval, no buzz
+      v.durN = h2(v.i, g, 222) * 0.4 + 0.35;
+      v.offN = h2(v.i, g, 111) * (1 - v.durN);
       const alive = h2(v.i, g, 303) < p.density ? 1 : 0;
       if (alive) {
         const bx = p.boundsMin[0] + h2(v.i, g, 101) * p.boundsSize[0];
@@ -239,7 +251,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     for (let k = 0; k < VOICES; k++) {
       const v = this.voices[k];
       const captured = v.poolRoll < p.poolThreshold;
-      const invL = captured ? invTau : invTau / v.lifeJitter;
+      // free slots are 1.8x tau (burst + silent gap), matching the GPU
+      const invL = captured ? invTau : invTau / (v.slotJitter * 1.8);
       const phi = captured ? 0 : v.phi;
       const phaseInc = (v.freq / sampleRate) * TABLE_SIZE;
       const tA = this.wheel[v.tableA];
@@ -260,10 +273,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         const gNow = Math.floor(x);
         if (gNow !== v.gen) this.refreshGeneration(v, gNow, captured, spat);
         if (v.amp > 0.0002) {
-          const a = x - gNow;
-          // captured bursts get a duty gap so the pulse train articulates
-          const aa = captured ? a / 0.6 : a;
-          const env = aa < 1 ? 4 * aa * (1 - aa) : 0;
+          const local = x - gNow;
+          // captured: duty-gapped pulse on the shared clock (order);
+          // free: jittered burst inside its slot (renewal — no clock)
+          const aa = captured ? local / 0.6 : (local - v.offN) / v.durN;
+          const env = aa > 0 && aa < 1 ? 4 * aa * (1 - aa) : 0;
           if (env > 0) {
             const idx = v.phase & TABLE_MASK;
             const pure = sine[idx];
@@ -279,10 +293,19 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       }
     }
 
+    // rumble blocker (~35 Hz one-pole high-pass): burst envelopes shed
+    // infrasonic energy that has no business in the mix
+    const R = this.hpR;
     const gain = p.gain * 2.4;
     for (let s = 0; s < n; s++) {
-      outL[s] = Math.tanh(outL[s] * gain);
-      outR[s] = Math.tanh(outR[s] * gain);
+      const xl = outL[s];
+      const xr = outR[s];
+      this.hpYL = xl - this.hpXL + R * this.hpYL;
+      this.hpYR = xr - this.hpXR + R * this.hpYR;
+      this.hpXL = xl;
+      this.hpXR = xr;
+      outL[s] = Math.tanh(this.hpYL * gain);
+      outR[s] = Math.tanh(this.hpYR * gain);
     }
 
     if (++this.blockCounter >= REPORT_INTERVAL_BLOCKS) {

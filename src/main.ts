@@ -102,7 +102,7 @@ renderer.setAnimationLoop((now: number) => {
   }
 
   interaction.update(dt);
-  field.update(state, tSec);
+  field.update(state, tSec, dt);
   audio.update(state, camera, tSec, field.sonicStride);
   controls.update();
 
