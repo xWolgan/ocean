@@ -19,8 +19,11 @@ npm run dev        # http://localhost:5173
 - **hold left mouse** — condense the field (noise → form, hiss → tone)
 - **right-drag** — orbit, **wheel** — zoom
 - first click enables sound
-- panel (top right): density / order / scale / color tilt — the master
-  state space; performance folder switches particle count (16k → 1M)
+- panel (top right): the substance parameters, each with an audible twin —
+  density (grain rate), speed (sonic restlessness/glides), scale
+  (register: big = low), lifespan (turnover / grain duration), tint
+  (visual), color randomness (the color of the noise: one band ↔ white);
+  performance folder switches particle count (16k → 1M)
 
 Renders on WebGPU where available, falls back to WebGL2 automatically
 (current backend shown in the stats overlay, top left).
@@ -51,9 +54,11 @@ npm run dev:quest  # https over LAN (self-signed cert)
   coherently, goes still, stops flickering.
 - `public/granular-processor.js` — AudioWorklet granular engine. A grain is
   a windowed noise burst through a per-grain bandpass:
-  density → spawn rate, order → bandwidth (noise → tone),
-  colorTilt → center frequency, scale → duration. The attractor spawns
-  ordered grains panned to its position.
+  density → spawn rate, speed → per-grain glide, scale → register,
+  colorRandom → spectral scatter + bandwidth, lifespan → grain duration.
+  The attractor spawns stable, narrow, panned grains. Note: the substance
+  has no "order" parameter — order is created by modulation (attractors),
+  never dialed in.
 - `src/audio/AudioEngine.ts` — main-thread bridge, ~60 Hz parameter stream
   with in-worklet smoothing.
 - `src/input/Interaction.ts` — mouse instrument with an AR envelope on

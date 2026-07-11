@@ -23,9 +23,13 @@ export function createPanel(
   // .listen() so sliders track state changed from elsewhere (later: composed automation)
   const field = gui.addFolder('field');
   field.add(state, 'density', 0, 1, 0.001).name('density').listen();
-  field.add(state, 'order', 0, 1, 0.001).name('order').listen();
+  field.add(state, 'speed', 0, 1, 0.001).name('speed').listen();
   field.add(state, 'scale', 0, 1, 0.001).name('scale').listen();
-  field.add(state, 'colorTilt', 0, 1, 0.001).name('color tilt').listen();
+  field.add(state, 'lifespan', 0, 1, 0.001).name('lifespan').listen();
+
+  const color = gui.addFolder('color');
+  color.addColor(state, 'tint').name('tint').listen();
+  color.add(state, 'colorRandom', 0, 1, 0.001).name('randomness').listen();
 
   const attractor = gui.addFolder('attractor');
   attractor.add(state.attractor, 'radius', 0.2, 3, 0.01).name('radius');

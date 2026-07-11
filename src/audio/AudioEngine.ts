@@ -44,9 +44,10 @@ export class AudioEngine {
       type: 'params',
       data: {
         density: state.density,
-        order: state.order,
+        speed: state.speed,
         scale: state.scale,
-        colorTilt: state.colorTilt,
+        colorRandom: state.colorRandom,
+        lifespan: state.lifespan,
         gain: state.gain,
         attractorStrength: state.attractor.strength,
         attractorPan: Math.max(
