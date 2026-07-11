@@ -95,13 +95,17 @@ renderer.setAnimationLoop((now: number) => {
     statsEl.textContent =
       `fps       ${fpsEma.toFixed(0)}\n` +
       `particles ${Math.round(field.count * state.density).toLocaleString()}\n` +
-      `grains    ${audio.grainCount}\n` +
+      `voices    ${audio.voiceCount}\n` +
       `backend   ${renderer.backend.constructor.name.replace('Backend', '')}`;
   }
 
   interaction.update(dt);
   field.update(renderer, state);
-  audio.update(state, now);
+  audio.updateParams(state, now);
+  // literal identity: read real particle states back, hand them to voices
+  void field.readSonics(renderer).then((sonics) => {
+    if (sonics) audio.updateVoices(sonics, field.sonicStride, camera, state);
+  });
   controls.update();
 
   renderer.render(scene, camera);

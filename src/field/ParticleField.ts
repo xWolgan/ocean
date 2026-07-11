@@ -10,6 +10,7 @@ import {
   uint,
   float,
   vec3,
+  vec4,
   uv,
   mix,
   clamp,
@@ -26,6 +27,11 @@ import {
 import type { FieldState } from '../state/FieldState';
 import { FIELD_CENTER, FIELD_HALF_EXTENTS } from '../state/FieldState';
 
+function toF32(raw: ArrayBuffer | Uint8Array): Float32Array {
+  const u8 = raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw;
+  return new Float32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4);
+}
+
 /**
  * The substance, visual rendering: a GPU-simulated cloud of particles.
  * Pure state = spatial TV noise (independent wander + flicker + churn of
@@ -33,12 +39,35 @@ import { FIELD_CENTER, FIELD_HALF_EXTENTS } from '../state/FieldState';
  * shell and raises their local `order`; ordered matter flows coherently,
  * goes still, brightens and stops flickering — noise becoming form.
  */
+/** Number of particles whose actual state is read back each frame and
+ *  given a literal audio voice. */
+export const SONIC_COUNT = 256;
+
+/**
+ * Bit-exact JS replica of TSL's hash() (PCG, pcg-random.org) — used to
+ * recompute per-particle constants (color band, density lottery) on the
+ * main thread so the GPU readback only needs dynamic state.
+ */
+export function pcgHash(n: number): number {
+  const state = (Math.imul(n, 747796405) + 2891336453) >>> 0;
+  const word = Math.imul((state >>> ((state >>> 28) + 4)) ^ state, 277803737) >>> 0;
+  return (((word >>> 22) ^ word) >>> 0) / 4294967296;
+}
+
 export class ParticleField {
   readonly count: number;
   readonly mesh: THREE.Sprite;
 
   private readonly computeInit: THREE.ComputeNode;
   private readonly computeUpdate: THREE.ComputeNode;
+  private readonly computeSonics: THREE.ComputeNode;
+  private readonly sonicsAttribute: THREE.BufferAttribute;
+  private sonicsInFlight = false;
+  private sonicsFrameCounter = 0;
+  private sonicsInterval = 2; // frames between readbacks; adapts to cost
+
+  /** Particle-buffer index step between consecutive sonic samples. */
+  readonly sonicStride: number;
 
   private readonly uDensity = uniform(0.5);
   private readonly uSpeed = uniform(0.5);
@@ -155,6 +184,32 @@ export class ParticleField {
       position.assign(boundsMin.add(mod(local, boundsSize)));
     })().compute(count);
 
+    // --- sonics: a strided sample of REAL particles, read back regularly,
+    // each owning a literal audio voice. A single vec4 per particle, one
+    // write per thread (the WebGL2 compute fallback can't do more):
+    // [x, y, z, packed] with packed = floor(order*255)*2 + lifeEnv.
+    // Static per-particle values (color band, density lottery) are
+    // recomputed on the main thread via pcgHash — same PCG as TSL hash.
+    const sonics = instancedArray(SONIC_COUNT, 'vec4');
+    this.sonicsAttribute = sonics.value;
+    this.sonicStride = Math.max(1, Math.floor(count / SONIC_COUNT));
+
+    this.computeSonics = Fn(() => {
+      const src = instanceIndex.mul(uint(this.sonicStride));
+      const position = positions.element(src);
+      const order = orders.element(src);
+      const age = ages.element(src);
+
+      const srcLifetime = this.uLifetime.mul(hash(src.add(uint(808))).add(0.5));
+      const frac = clamp(age.div(srcLifetime), 0, 1);
+      const lifeEnv = smoothstep(0.0, 0.08, frac)
+        .mul(smoothstep(1.0, 0.8, frac))
+        .clamp(0, 0.999);
+      const packed = floor(clamp(order, 0, 1).mul(255)).mul(2).add(lifeEnv);
+
+      sonics.element(instanceIndex).assign(vec4(position, packed));
+    })().compute(SONIC_COUNT);
+
     // --- rendering ---
 
     const material = new THREE.SpriteNodeMaterial();
@@ -219,6 +274,28 @@ export class ParticleField {
     this.uAttractorStrength.value = state.attractor.strength;
 
     renderer.compute(this.computeUpdate);
+  }
+
+  /**
+   * Sample the real particle states for the audio voices. Internally
+   * paced: skips while a readback is in flight, runs at most every
+   * `sonicsInterval` frames, and backs off when readback is expensive
+   * (software GL stalls hard on synchronous buffer reads).
+   */
+  async readSonics(renderer: THREE.WebGPURenderer): Promise<Float32Array | null> {
+    if (this.sonicsInFlight) return null;
+    if (++this.sonicsFrameCounter < this.sonicsInterval) return null;
+    this.sonicsFrameCounter = 0;
+    this.sonicsInFlight = true;
+    const t0 = performance.now();
+    try {
+      renderer.compute(this.computeSonics);
+      return toF32(await renderer.getArrayBufferAsync(this.sonicsAttribute));
+    } finally {
+      this.sonicsInFlight = false;
+      const cost = performance.now() - t0;
+      this.sonicsInterval = cost > 6 ? Math.min(12, this.sonicsInterval + 1) : 2;
+    }
   }
 
   dispose(): void {

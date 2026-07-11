@@ -1,35 +1,45 @@
 /**
- * OCEAN granular engine — the substance, audible rendering.
+ * OCEAN sonic-particle engine — the substance, audible rendering.
  *
- * A grain is a windowed burst of white noise through a per-grain bandpass
- * filter. Every visual property of the substance has its audible twin:
- *   density     -> grain spawn rate      (silence -> crackle -> hiss)
- *   speed       -> per-grain glide       (static bands -> restless chirps)
- *   scale       -> register              (big = low, small = high)
- *   colorRandom -> the color of the noise: spectral scatter + bandwidth
- *                  (0 = one colored band, 1 = full-spectrum white)
- *   lifespan    -> grain duration        (short lives crackle, long wash)
- * The attractor spawns an additional population of ordered grains —
- * stable, narrow, panned to its position: sound focusing where visual
- * structure forms.
+ * The identity is literal: a sample of REAL particles from the GPU
+ * simulation is read back each frame, and each sampled particle owns one
+ * continuous voice here — a stream of white noise through a bandpass
+ * filter, alive exactly as long as the particle is alive.
+ *
+ *   particle position -> stereo placement + distance loudness
+ *   particle birth/death (lifespan) -> voice fades in/out
+ *   particle color -> spectral band (colorRandom scatters both)
+ *   particle order (attractor capture) -> bandwidth: ordered matter rings
+ *   scale -> register (big = low), applied on the main thread
+ *   speed -> per-voice frequency wobble (restlessness)
+ *   density -> which particles exist at all
+ *
+ * The main thread sends, ~30 Hz, a Float32Array of per-voice targets
+ * [ampL, ampR, freqHz, Q] computed from the readback + listener pose.
+ * No separate "attractor sound" exists: what you hear near the attractor
+ * is the actual captured particles ringing.
  */
 
-const MAX_GRAINS = 512;
+const VOICES = 256;
 const REPORT_INTERVAL_BLOCKS = 40; // ~0.1s at 128-sample blocks
 
-class Grain {
-  constructor() {
-    this.active = false;
-    this.age = 0;
-    this.dur = 0;
-    this.amp = 0;
-    this.panL = 0.7;
-    this.panR = 0.7;
-    this.rngState = 1;
+class Voice {
+  constructor(seed) {
+    this.rngState = seed | 1;
+    // smoothed currents
+    this.ampL = 0;
+    this.ampR = 0;
     this.freq = 440;
     this.q = 1;
-    this.glidePerBlock = 1; // frequency multiplier applied per 128-sample block
-    // RBJ bandpass (constant 0 dB peak gain) coefficients + state
+    // targets (set by main-thread message)
+    this.tAmpL = 0;
+    this.tAmpR = 0;
+    this.tFreq = 440;
+    this.tQ = 1;
+    // restlessness LFO — per-voice random rate and phase
+    this.lfoPhase = ((seed >>> 8) & 1023) / 1023 * 6.28318;
+    this.lfoRate = 0.5 + ((seed >>> 18) & 255) / 255 * 2.5; // Hz
+    // biquad state
     this.b0 = 0;
     this.b2 = 0;
     this.a1 = 0;
@@ -40,36 +50,6 @@ class Grain {
     this.y2 = 0;
   }
 
-  computeCoeffs() {
-    const w0 = (2 * Math.PI * Math.min(this.freq, sampleRate * 0.45)) / sampleRate;
-    const alpha = Math.sin(w0) / (2 * this.q);
-    const a0 = 1 + alpha;
-    this.b0 = alpha / a0;
-    this.b2 = -alpha / a0;
-    this.a1 = (-2 * Math.cos(w0)) / a0;
-    this.a2 = (1 - alpha) / a0;
-  }
-
-  start(dur, freq, q, pan, amp, glidePerBlock, seed) {
-    this.active = true;
-    this.age = 0;
-    this.dur = Math.max(1, Math.floor(dur * sampleRate));
-    this.rngState = seed | 1;
-    this.freq = Math.max(30, freq);
-    this.q = q;
-    this.glidePerBlock = glidePerBlock;
-    this.computeCoeffs();
-    this.x1 = this.x2 = this.y1 = this.y2 = 0;
-
-    // narrow bands pass less noise energy; compensate so tones stay present
-    this.amp = amp * Math.min(3.5, 0.55 * Math.sqrt(q) + 0.45);
-
-    const p = (pan + 1) * 0.25 * Math.PI; // equal-power
-    this.panL = Math.cos(p);
-    this.panR = Math.sin(p);
-  }
-
-  // xorshift32 white noise in [-1, 1]
   noise() {
     let x = this.rngState;
     x ^= x << 13;
@@ -79,29 +59,44 @@ class Grain {
     return (x >>> 0) / 2147483648 - 1;
   }
 
+  /** Per-block parameter smoothing + coefficient update. */
+  tick(blockDur, wobbleOct) {
+    this.ampL += (this.tAmpL - this.ampL) * 0.2;
+    this.ampR += (this.tAmpR - this.ampR) * 0.2;
+    this.freq += (this.tFreq - this.freq) * 0.15;
+    this.q += (this.tQ - this.q) * 0.15;
+
+    this.lfoPhase += 6.28318 * this.lfoRate * blockDur;
+    const wobble = wobbleOct === 0 ? 1 : Math.pow(2, Math.sin(this.lfoPhase) * wobbleOct);
+
+    const f = Math.min(Math.max(this.freq * wobble, 30), sampleRate * 0.45);
+    const w0 = (2 * Math.PI * f) / sampleRate;
+    const alpha = Math.sin(w0) / (2 * this.q);
+    const a0 = 1 + alpha;
+    this.b0 = alpha / a0;
+    this.b2 = -alpha / a0;
+    this.a1 = (-2 * Math.cos(w0)) / a0;
+    this.a2 = (1 - alpha) / a0;
+  }
+
+  get audible() {
+    return this.ampL + this.ampR > 0.0005 || this.tAmpL + this.tAmpR > 0.0005;
+  }
+
   process(outL, outR, n) {
-    if (this.glidePerBlock !== 1) {
-      this.freq = Math.min(Math.max(this.freq * this.glidePerBlock, 30), sampleRate * 0.45);
-      this.computeCoeffs();
-    }
-    const invDur = 1 / this.dur;
+    // narrow bands pass less noise energy; compensate so tones stay present
+    const comp = Math.min(3.5, 0.55 * Math.sqrt(this.q) + 0.45);
+    const gL = this.ampL * comp;
+    const gR = this.ampR * comp;
     for (let i = 0; i < n; i++) {
-      if (this.age >= this.dur) {
-        this.active = false;
-        return;
-      }
-      const phase = this.age * invDur;
-      const env = 0.5 - 0.5 * Math.cos(2 * Math.PI * phase); // Hann
       const x = this.noise();
       const y = this.b0 * x + this.b2 * this.x2 - this.a1 * this.y1 - this.a2 * this.y2;
       this.x2 = this.x1;
       this.x1 = x;
       this.y2 = this.y1;
       this.y1 = y;
-      const s = y * env * this.amp;
-      outL[i] += s * this.panL;
-      outR[i] += s * this.panR;
-      this.age++;
+      outL[i] += y * gL;
+      outR[i] += y * gR;
     }
   }
 }
@@ -109,115 +104,57 @@ class Grain {
 class OceanGranularProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.grains = [];
-    for (let i = 0; i < MAX_GRAINS; i++) this.grains.push(new Grain());
-
-    // smoothed parameter currents and their targets
-    this.params = {
-      density: 0, speed: 0.5, scale: 0.4, colorRandom: 0.5, lifespan: 0.7,
-      gain: 0.5, attractorStrength: 0, attractorPan: 0,
+    let seed = 22222;
+    const next = () => {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      return seed;
     };
-    this.targets = { ...this.params };
+    this.voices = [];
+    for (let i = 0; i < VOICES; i++) this.voices.push(new Voice(next()));
 
-    this.fieldSpawnAcc = 0;
-    this.attractorSpawnAcc = 0;
+    this.gain = 0.5;
+    this.speed = 0.5;
     this.blockCounter = 0;
-    this.rng = 22222;
 
     this.port.onmessage = (e) => {
-      if (e.data.type === 'params') Object.assign(this.targets, e.data.data);
+      const d = e.data;
+      if (d.type === 'voices') {
+        // Float32Array [ampL, ampR, freqHz, Q] × VOICES
+        const v = d.data;
+        const n = Math.min(VOICES, v.length / 4);
+        for (let i = 0; i < n; i++) {
+          const voice = this.voices[i];
+          voice.tAmpL = v[i * 4];
+          voice.tAmpR = v[i * 4 + 1];
+          voice.tFreq = v[i * 4 + 2];
+          voice.tQ = v[i * 4 + 3];
+        }
+      } else if (d.type === 'params') {
+        if (d.data.gain !== undefined) this.gain = d.data.gain;
+        if (d.data.speed !== undefined) this.speed = d.data.speed;
+      }
     };
-  }
-
-  rand() {
-    let x = this.rng;
-    x ^= x << 13;
-    x ^= x >>> 17;
-    x ^= x << 5;
-    this.rng = x;
-    return (x >>> 0) / 4294967296;
-  }
-
-  findFreeGrain() {
-    for (let i = 0; i < MAX_GRAINS; i++) if (!this.grains[i].active) return this.grains[i];
-    return null;
-  }
-
-  /** register center: scale 0 -> ~3.6 kHz (tiny), scale 1 -> ~180 Hz (huge) */
-  registerFreq(p) {
-    return 180 * Math.pow(20, 1 - p.scale);
-  }
-
-  /** grain duration from lifespan: ~30ms .. ~600ms */
-  grainDur(p) {
-    return 0.03 * Math.pow(20, p.lifespan);
-  }
-
-  glideFactor(p) {
-    const octPerSec = (this.rand() * 2 - 1) * Math.pow(p.speed, 2) * 8;
-    return Math.pow(2, (octPerSec * 128) / sampleRate);
-  }
-
-  spawnField(p) {
-    const g = this.findFreeGrain();
-    if (!g) return;
-    // the color of the noise: scatter + bandwidth follow colorRandom
-    const jitterOct = (this.rand() * 2 - 1) * 2.2 * p.colorRandom;
-    const freq = this.registerFreq(p) * Math.pow(2, jitterOct);
-    const q = 0.7 + Math.pow(1 - p.colorRandom, 2) * 18;
-    const pan = this.rand() * 2 - 1;
-    g.start(this.grainDur(p), freq, q, pan, 0.11, this.glideFactor(p),
-      (this.rand() * 0xffffffff) | 0);
-  }
-
-  spawnAttractor(p) {
-    const g = this.findFreeGrain();
-    if (!g) return;
-    const jitterOct = (this.rand() * 2 - 1) * 0.12;
-    const freq = this.registerFreq(p) * Math.pow(2, jitterOct);
-    const q = 12 + p.attractorStrength * 26;
-    const pan = p.attractorPan + (this.rand() * 2 - 1) * 0.15;
-    // ordered grains are stable (no glide) and a little longer
-    g.start(this.grainDur(p) * 1.4, freq, q, Math.max(-1, Math.min(1, pan)),
-      0.13, 1, (this.rand() * 0xffffffff) | 0);
   }
 
   process(_inputs, outputs) {
     const outL = outputs[0][0];
     const outR = outputs[0][1] || outputs[0][0];
     const n = outL.length;
-
-    // smooth params toward targets
-    const p = this.params;
-    const t = this.targets;
-    for (const k in p) p[k] += (t[k] - p[k]) * 0.25;
-
-    // spawn: Poisson-ish accumulators
     const blockDur = n / sampleRate;
-    const fieldRate = Math.pow(p.density, 1.8) * 550; // grains/sec
-    this.fieldSpawnAcc += fieldRate * blockDur;
-    while (this.fieldSpawnAcc >= 1) {
-      this.fieldSpawnAcc -= 1;
-      this.spawnField(p);
-    }
-    const attractorRate = p.attractorStrength * 140;
-    this.attractorSpawnAcc += attractorRate * blockDur;
-    while (this.attractorSpawnAcc >= 1) {
-      this.attractorSpawnAcc -= 1;
-      this.spawnAttractor(p);
-    }
+    const wobbleOct = Math.pow(this.speed, 2) * 0.5;
 
     let active = 0;
-    for (let i = 0; i < MAX_GRAINS; i++) {
-      const g = this.grains[i];
-      if (g.active) {
-        g.process(outL, outR, n);
-        active++;
-      }
+    for (let i = 0; i < VOICES; i++) {
+      const v = this.voices[i];
+      if (!v.audible) continue;
+      v.tick(blockDur, wobbleOct * (1 - Math.min(1, v.q / 40))); // ordered voices hold still
+      v.process(outL, outR, n);
+      active++;
     }
 
-    // master gain + gentle saturation
-    const gain = p.gain * 1.4;
+    const gain = this.gain * 2.2;
     for (let i = 0; i < n; i++) {
       outL[i] = Math.tanh(outL[i] * gain);
       outR[i] = Math.tanh(outR[i] * gain);

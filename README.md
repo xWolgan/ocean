@@ -52,13 +52,22 @@ npm run dev:quest  # https over LAN (self-signed cert)
   compute) + instanced sprite rendering. The attractor condenses particles
   onto a spherical shell and raises local `order`; ordered matter flows
   coherently, goes still, stops flickering.
-- `public/granular-processor.js` — AudioWorklet granular engine. A grain is
-  a windowed noise burst through a per-grain bandpass:
-  density → spawn rate, speed → per-grain glide, scale → register,
-  colorRandom → spectral scatter + bandwidth, lifespan → grain duration.
-  The attractor spawns stable, narrow, panned grains. Note: the substance
-  has no "order" parameter — order is created by modulation (attractors),
-  never dialed in.
+- `public/granular-processor.js` — AudioWorklet **sonic-particle engine**.
+  The identity is literal: 256 real particles are sampled from the GPU
+  simulation every couple of frames (`ParticleField.readSonics`, a small
+  storage-buffer readback) and each owns one continuous voice — white
+  noise through a bandpass, alive exactly as long as its particle:
+  position → stereo placement + distance loudness, birth/death → fade
+  in/out, color band → filter center (colorRandom scatters both),
+  order (attractor capture) → bandwidth: captured matter literally rings.
+  scale → register (big = low), speed → restlessness wobble. There is no
+  separate "attractor sound" — what you hear near the attractor is the
+  captured particles themselves. Note: the substance has no "order"
+  parameter — order is created by modulation, never dialed in.
+  (WebGL2 fallback constraint: the compute readback buffer is one vec4
+  per particle, one write per thread — transform feedback can't scatter;
+  static per-particle values are recomputed on the main thread with a
+  bit-exact JS replica of TSL's PCG hash.)
 - `src/audio/AudioEngine.ts` — main-thread bridge, ~60 Hz parameter stream
   with in-worklet smoothing.
 - `src/input/Interaction.ts` — mouse instrument with an AR envelope on
