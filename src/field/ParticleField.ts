@@ -9,6 +9,7 @@ import {
   uv,
   mix,
   clamp,
+  pow,
   smoothstep,
   length,
   step,
@@ -71,6 +72,9 @@ export class ParticleField {
   private readonly uTint = uniform(new THREE.Vector3(0.75, 0.78, 0.85));
   private readonly uColorRandom = uniform(0.5);
   private readonly uSizeRandom = uniform(1.0);
+  private readonly uSmear = uniform(0.5);
+  private readonly uSmearK = uniform(0.94);
+  private readonly uAsymC = uniform(1.0);
   private readonly uAttractorPos = uniform(new THREE.Vector3(0, 1.5, 0));
   private readonly uAttractorRadius = uniform(1.0);
   private readonly uAttractorStrength = uniform(0.0);
@@ -144,25 +148,31 @@ export class ParticleField {
     // --- choose timeline per particle ---
     const position = mix(freePos.add(drift), capturedPos, captured);
 
+    // The ONE envelope, two senses: smear = window steepness (k), asymmetry
+    // = attack/decay skew via age-warp (c). Identical math in the worklet.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const envFn = (aa: any) => {
+      const uw = pow(clamp(aa, 0, 1), this.uAsymC);
+      const core = uw.mul(float(1).sub(uw)).mul(4).max(0);
+      return pow(core, this.uSmearK);
+    };
+
     // free burst envelope: sampled per frame — random phases make display
     // aliasing read as sparkle, which IS the noise aesthetic
-    const envFree = a.mul(float(1).sub(a)).mul(4).mul(aliveFree);
+    const envFree = envFn(a).mul(aliveFree);
 
-    // captured envelope: the frame is a camera EXPOSURE, not a sample.
-    // Analytic mean of the duty-0.6 parabola pulse over [t, t+dt] — exact
-    // across any number of pulses, so the coherent cloud cannot strobe
-    // against the refresh rate (which does not belong to this universe).
+    // captured envelope: the frame is a camera EXPOSURE, not a sample —
+    // stratified sampling of the pulse over [t, t+dt] so the coherent
+    // cloud cannot strobe against the refresh rate (a foreign clock).
+    const dx = this.uDeltaTime.div(this.uTau);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const pulseIntegral = (x: any) => {
-      const u = clamp(fract(x).div(0.6), 0, 1);
-      return floor(x)
-        .mul(0.4)
-        .add(u.mul(u).mul(float(2).sub(u.mul(4 / 3))).mul(0.6));
-    };
-    const x1 = xL.add(this.uDeltaTime.div(this.uTau));
-    const meanEnvCap = pulseIntegral(x1)
-      .sub(pulseIntegral(xL))
-      .div(x1.sub(xL).max(1e-6));
+    let acc: any = float(0);
+    const EXPOSURE_SAMPLES = 8;
+    for (let s = 0; s < EXPOSURE_SAMPLES; s++) {
+      const aCap = fract(xL.add(dx.mul((s + 0.5) / EXPOSURE_SAMPLES))).div(0.6);
+      acc = acc.add(envFn(aCap));
+    }
+    const meanEnvCap = acc.div(EXPOSURE_SAMPLES);
 
     const bright = mix(envFree, meanEnvCap, captured);
 
@@ -198,8 +208,10 @@ export class ParticleField {
       .mul(bright.mul(0.9).add(0.05))
       .mul(captured.mul(0.8).add(1));
 
+    // smear also softens the flash in SPACE: the same window, spatially
     const d = length(uv().sub(0.5));
-    material.opacityNode = smoothstep(0.12, 0.5, d).oneMinus().mul(0.85);
+    const innerEdge = mix(float(0.38), float(0.02), this.uSmear);
+    material.opacityNode = smoothstep(innerEdge, 0.5, d).oneMinus().mul(0.85);
 
     this.mesh = new THREE.Sprite(material);
     this.mesh.count = count;
@@ -217,6 +229,9 @@ export class ParticleField {
     this.uTint.value.set(state.tint.r, state.tint.g, state.tint.b);
     this.uColorRandom.value = state.colorRandom;
     this.uSizeRandom.value = state.sizeRandom;
+    this.uSmear.value = state.smear;
+    this.uSmearK.value = smearToK(state.smear);
+    this.uAsymC.value = asymmetryToC(state.asymmetry);
     this.uAttractorPos.value.copy(state.attractor.position);
     this.uAttractorRadius.value = state.attractor.radius;
     this.uAttractorStrength.value = state.attractor.strength;
@@ -231,4 +246,16 @@ export class ParticleField {
  *  is 1/tau: 1000 Hz at the short end, a 10 Hz pulse at the long end. */
 export function lifespanToTau(lifespan: number): number {
   return 0.001 * Math.pow(10, 2 * lifespan);
+}
+
+/** smear 0..1 -> window exponent k: hard/percussive .. gaussian bloom.
+ *  smear 0.5 ~ the plain parabola. Shared with the audio worklet. */
+export function smearToK(smear: number): number {
+  return 0.25 + smear * smear * 2.75;
+}
+
+/** asymmetry -1..1 -> age-warp exponent c: peak early (appearing) ..
+ *  peak late (vanishing). 0 = symmetric. Shared with the audio worklet. */
+export function asymmetryToC(asymmetry: number): number {
+  return Math.pow(2, asymmetry * 1.5);
 }

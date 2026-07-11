@@ -38,9 +38,16 @@ export interface FieldState {
   /** 0..1 — size scatter between particles. Audibly: pitch spread —
    *  0 = every grain at the register pitch (one tone), 1 = ~1.5 octaves. */
   sizeRandom: number;
-  /** 0..1 — mortality: mean particle lifetime ~0.3s .. ~30s. Constant
-   *  population, tunable turnover. Audibly: grain duration. */
+  /** 0..1 — mortality: mean flash duration 1..100ms. Audibly: grain
+   *  duration; also the pitch of ordered (synchronized) matter = 1/tau. */
   lifespan: number;
+  /** 0..1 — envelope softness: 0 = hard-edged flash / percussive grain,
+   *  1 = gaussian bloom / washy grain. One window, two senses. */
+  smear: number;
+  /** -1..1 — envelope skew: negative = fast attack, slow decay (things
+   *  APPEARING); positive = slow attack, fast decay (things VANISHING).
+   *  The arrow of time of a single grain. */
+  asymmetry: number;
   /** 0..1 — master audio gain. */
   gain: number;
   attractor: AttractorState;
@@ -56,6 +63,8 @@ export function createFieldState(): FieldState {
     // unbound: no audible twin yet — defaults to stillness
     speed: 0.0,
     scale: 0.4,
+    smear: 0.5,
+    asymmetry: 0.0,
     tint: new Color(0.75, 0.78, 0.85),
     colorRandom: 0.5,
     sizeRandom: 1.0,

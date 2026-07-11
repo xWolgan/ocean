@@ -66,9 +66,16 @@ the same noise waveform each cycle; repetition of the same chance event
 is what makes both a stable form and a harmonic spectrum. `lifespan` is
 therefore also the pitch axis: 100 ms = 10 Hz pulse, 1 ms = 1 kHz tone.
 
-- `src/state/FieldState.ts` — single source of truth; the proto modulation
-  bus. Everything (mouse, GUI, later: network players and composed
-  timeline) writes here; both renderers read it.
+- `src/state/ModulationBus.ts` — the synthesizer's nervous system (Stage
+  2): parameters have BASE values (the patch), SOURCES produce control
+  signals (the mouse touch envelope today; timeline envelopes, LFOs and
+  the second player tomorrow), ROUTES connect them with amounts (the
+  modulation matrix). Resolved once per frame into a FieldState snapshot —
+  the only thing renderers read. A gesture and a composed envelope are
+  indistinguishable to the substance. Try it live:
+  `__ocean.bus.route('x','lifespan',0.5); __ocean.bus.source('x').value=1`.
+- `src/state/FieldState.ts` — the resolved-parameter snapshot shape +
+  shared mappings (lifespanToTau, smearToK, asymmetryToC).
 - `src/field/ParticleField.ts` — the process as TSL material nodes (fully
   stateless, no compute passes) + `pcgHash`, the bit-exact JS replica of
   TSL's hash that keeps both renderings on the same randomness.
@@ -81,6 +88,8 @@ therefore also the pitch axis: 100 ms = 10 Hz pulse, 1 ms = 1 kHz tone.
   |---|---|
   | amplitude | brightness |
   | duration | lifespan |
+  | envelope softness | smear (one window: temporal fade + spatial edge + amplitude curve) |
+  | envelope skew | asymmetry (appear ↔ vanish — the grain's arrow of time) |
   | content pitch | size (big = low; sizeRandom = pitch spread, 0 = one tone) |
   | secondary tones: amount | saturation |
   | secondary tones: recipe | hue (circular timbre wheel) |

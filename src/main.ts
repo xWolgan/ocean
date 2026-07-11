@@ -2,13 +2,14 @@ import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { XRButton } from 'three/addons/webxr/XRButton.js';
 
-import { createFieldState, FIELD_CENTER } from './state/FieldState';
+import { FIELD_CENTER } from './state/FieldState';
+import { ModulationBus } from './state/ModulationBus';
 import { ParticleField } from './field/ParticleField';
 import { AudioEngine } from './audio/AudioEngine';
 import { Interaction } from './input/Interaction';
 import { createPanel } from './ui/Panel';
 
-const state = createFieldState();
+const bus = new ModulationBus();
 const settings = { particleCount: 1 << 17 };
 
 const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -50,8 +51,8 @@ function setParticleCount(count: number): void {
 }
 
 const audio = new AudioEngine();
-const interaction = new Interaction(camera, state, renderer.domElement);
-createPanel(state, interaction, settings, setParticleCount);
+const interaction = new Interaction(camera, bus, renderer.domElement);
+createPanel(bus, interaction, settings, setParticleCount);
 
 document.body.appendChild(XRButton.createButton(renderer));
 
@@ -72,7 +73,9 @@ let fpsEma = 0;
 let statsTimer = 0;
 
 // dev hook for automated verification and console experiments
-Object.assign(window, { __ocean: { state, audio, renderer, get field() { return field; } } });
+Object.assign(window, {
+  __ocean: { bus, state: bus.out, audio, renderer, get field() { return field; } },
+});
 console.log('[ocean] backend:', renderer.backend.constructor.name);
 
 // --- main loop ---
@@ -96,14 +99,15 @@ renderer.setAnimationLoop((now: number) => {
     statsTimer = 0;
     statsEl.textContent =
       `fps       ${fpsEma.toFixed(0)}\n` +
-      `particles ${Math.round(field.count * state.density).toLocaleString()}\n` +
+      `particles ${Math.round(field.count * bus.out.density).toLocaleString()}\n` +
       `voices    ${audio.voiceCount}\n` +
       `backend   ${renderer.backend.constructor.name.replace('Backend', '')}`;
   }
 
   interaction.update(dt);
-  field.update(state, tSec, dt);
-  audio.update(state, camera, tSec, field.sonicStride);
+  bus.update();
+  field.update(bus.out, tSec, dt);
+  audio.update(bus.out, camera, tSec, field.sonicStride);
   controls.update();
 
   renderer.render(scene, camera);

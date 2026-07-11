@@ -1,5 +1,5 @@
 import GUI from 'lil-gui';
-import type { FieldState } from '../state/FieldState';
+import type { ModulationBus } from '../state/ModulationBus';
 import type { Interaction } from '../input/Interaction';
 
 export const PARTICLE_COUNTS: Record<string, number> = {
@@ -11,35 +11,46 @@ export const PARTICLE_COUNTS: Record<string, number> = {
   '1M': 1 << 20,
 };
 
-/** lil-gui control panel over the FieldState — the kernel's front panel. */
+/**
+ * The instrument's front panel. Sliders edit the bus's BASE values (the
+ * patch); modulation arrives on top of them through the matrix. The
+ * "max strength" slider is literally a route amount — the first visible
+ * patch cord: playerA.touch → attractorStrength.
+ */
 export function createPanel(
-  state: FieldState,
+  bus: ModulationBus,
   interaction: Interaction,
   settings: { particleCount: number },
   onParticleCountChange: (count: number) => void,
 ): GUI {
   const gui = new GUI({ title: 'OCEAN — substance' });
+  const base = bus.base;
 
-  // .listen() so sliders track state changed from elsewhere (later: composed automation)
+  // .listen() so sliders track values changed from elsewhere (presets, automation)
   const field = gui.addFolder('field');
-  field.add(state, 'density', 0, 1, 0.001).name('density').listen();
-  field.add(state, 'scale', 0, 1, 0.001).name('scale (pitch: big = low)').listen();
-  field.add(state, 'lifespan', 0, 1, 0.001).name('lifespan (duration)').listen();
+  field.add(base, 'density', 0, 1, 0.001).name('density').listen();
+  field.add(base, 'scale', 0, 1, 0.001).name('scale (pitch: big = low)').listen();
+  field.add(base, 'lifespan', 0, 1, 0.001).name('lifespan (duration)').listen();
+  field.add(base, 'smear', 0, 1, 0.001).name('smear (envelope softness)').listen();
+  field.add(base, 'asymmetry', -1, 1, 0.001).name('asymmetry (appear ↔ vanish)').listen();
 
   const color = gui.addFolder('color');
-  color.addColor(state, 'tint').name('tint (hue→timbre, sat→richness)').listen();
+  color.addColor(bus, 'baseTint').name('tint (hue→timbre, sat→richness)').listen();
 
   // dispersions: each property of the substance has a mean and a scatter
   const rand = gui.addFolder('randomness');
-  rand.add(state, 'colorRandom', 0, 1, 0.001).name('color (timbre)').listen();
-  rand.add(state, 'sizeRandom', 0, 1, 0.001).name('size (pitch spread)').listen();
+  rand.add(base, 'colorRandom', 0, 1, 0.001).name('color (timbre)').listen();
+  rand.add(base, 'sizeRandom', 0, 1, 0.001).name('size (pitch spread)').listen();
 
   const attractor = gui.addFolder('attractor');
-  attractor.add(state.attractor, 'radius', 0.2, 3, 0.01).name('radius');
-  attractor.add(interaction, 'strengthMax', 0, 1, 0.01).name('max strength');
+  attractor.add(base, 'attractorRadius', 0.2, 3, 0.01).name('radius').listen();
+  attractor
+    .add(interaction.touchRoute, 'amount', 0, 1, 0.01)
+    .name('touch → strength (route)')
+    .listen();
 
   const audio = gui.addFolder('audio');
-  audio.add(state, 'gain', 0, 1, 0.01).name('gain');
+  audio.add(base, 'gain', 0, 1, 0.01).name('gain').listen();
 
   const perf = gui.addFolder('performance');
   perf
@@ -49,7 +60,7 @@ export function createPanel(
 
   // visual-only parameters with no audible twin yet
   const unbound = gui.addFolder('unbound');
-  unbound.add(state, 'speed', 0, 1, 0.001).name('speed (visual drift)').listen();
+  unbound.add(base, 'speed', 0, 1, 0.001).name('speed (visual drift)').listen();
 
   return gui;
 }

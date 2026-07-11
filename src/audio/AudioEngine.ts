@@ -68,6 +68,8 @@ export class AudioEngine {
         registerHz: 180 * Math.pow(20, 1 - state.scale),
         colorRandom: state.colorRandom,
         sizeRandom: state.sizeRandom,
+        smear: state.smear,
+        asymmetry: state.asymmetry,
         tint: [state.tint.r, state.tint.g, state.tint.b],
         gain: state.gain,
         // worklet time = currentTime + timeOffset  ==  app tSec

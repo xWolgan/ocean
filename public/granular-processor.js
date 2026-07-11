@@ -113,6 +113,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       registerHz: 800,
       colorRandom: 0.5,
       sizeRandom: 1.0,
+      smear: 0.5,
+      asymmetry: 0.0,
       tint: [0.75, 0.78, 0.85],
       gain: 0.5,
       timeOffset: 0,
@@ -262,6 +264,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const invTau = 1 / p.tau;
     const t0 = currentTime + this.smoothOffset;
     const dt = 1 / sampleRate;
+    // the ONE envelope, same math as the GPU: smear -> steepness k,
+    // asymmetry -> age-warp c (peak early = appearing, late = vanishing)
+    const envK = 0.25 + p.smear * p.smear * 2.75;
+    const envC = Math.pow(2, p.asymmetry * 1.5);
     const spat = [0, 0];
     const sine = this.sine;
     let active = 0;
@@ -295,7 +301,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           // captured: duty-gapped pulse on the shared clock (order);
           // free: jittered burst inside its slot (renewal — no clock)
           const aa = captured ? local / 0.6 : (local - v.offN) / v.durN;
-          const env = aa > 0 && aa < 1 ? 4 * aa * (1 - aa) : 0;
+          let env = 0;
+          if (aa > 0 && aa < 1) {
+            const uw = Math.pow(aa, envC);
+            env = Math.pow(4 * uw * (1 - uw), envK);
+          }
           if (env > 0) {
             const idx = v.phase & TABLE_MASK;
             const pure = sine[idx];
