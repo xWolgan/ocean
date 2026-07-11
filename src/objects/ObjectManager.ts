@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import type { ObjectDef } from './ObjectDef';
+import { normalizePatch, type ObjectDef } from './ObjectDef';
 import { buildTargets, TARGETS_PER_OBJECT, type TargetCloud } from './generators';
 import { lifespanToTau, pcgHash, SONIC_COUNT } from '../field/ParticleField';
 
@@ -24,6 +24,15 @@ export interface AudioObjectDescriptor {
   centerY: number;
   centerZ: number;
   reach: number; // boundRadius + influenceRadius
+  gain: number;
+  crV: number; // colorRandom value / weight
+  crW: number;
+  srV: number; // sizeRandom value / weight
+  srW: number;
+  smearV: number;
+  smearW: number;
+  asymV: number;
+  asymW: number;
 }
 
 export class ObjectManager {
@@ -61,6 +70,7 @@ export class ObjectManager {
   async add(def: ObjectDef): Promise<number> {
     const m = this.firstFreeSlot();
     if (m === -1) return -1;
+    def.patch = normalizePatch(def.patch);
     const inst: ObjectInstance = { def, cloud: null, level: 0 };
     this.slots[m] = inst;
     this.selected = m;
@@ -120,7 +130,9 @@ export class ObjectManager {
     return this.slots.map((inst) => {
       if (!inst || !inst.cloud || inst.level <= 0.001) {
         return { level: 0, claim: 0, tau: 0.02, sync: 1, registerHz: 800,
-                 centerX: 0, centerY: 0, centerZ: 0, reach: 0 };
+                 centerX: 0, centerY: 0, centerZ: 0, reach: 0, gain: 1,
+                 crV: 0, crW: 0, srV: 0.5, srW: 0, smearV: 0.5, smearW: 0,
+                 asymV: 0, asymW: 0 };
       }
       const p = inst.def.patch;
       const objRegister = 180 * Math.pow(20, 1 - p.scale.value);
@@ -135,6 +147,15 @@ export class ObjectManager {
         centerY: inst.cloud.center.y,
         centerZ: inst.cloud.center.z,
         reach: inst.cloud.boundRadius + inst.def.influenceRadius,
+        gain: p.gain,
+        crV: p.colorRandom.value,
+        crW: p.colorRandom.weight * inst.level,
+        srV: p.sizeRandom.value,
+        srW: p.sizeRandom.weight * inst.level,
+        smearV: p.smear.value,
+        smearW: p.smear.weight * inst.level,
+        asymV: p.asymmetry.value,
+        asymW: p.asymmetry.weight * inst.level,
       };
     });
   }

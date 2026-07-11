@@ -218,17 +218,27 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       const spread = Math.pow(2, (0.85 - sizeJitter) * 2.2);
       v.freq = Math.min(Math.max(p.registerHz * spread, 30), sampleRate * 0.45);
 
-      // captured-voice tuning: the object's register + the voice's target
-      // color (image pixel or object tint), same hue/sat mapping as ambient
+      // captured-voice tuning: the object's register (with its own pitch
+      // spread) + the voice's target color (image pixel or object tint)
+      // scattered by the object's own color dispersion — same mappings as
+      // the ambient field, blended per property by the object's weights
       const obj = p.objects[v.objSlot];
       if (obj && this.voiceTargets) {
+        const srEff = p.sizeRandom + (obj.srV - p.sizeRandom) * obj.srW;
+        const sjCap = (v.sizeRoll - 0.5) * 0.7 * srEff + 0.85;
+        const spreadCap = Math.pow(2, (0.85 - sjCap) * 2.2);
         v.capFreq = Math.min(
-          Math.max(obj.registerHz * spread, 30),
+          Math.max(obj.registerHz * spreadCap, 30),
           sampleRate * 0.45,
         );
         const vt = this.voiceTargets;
         const k6 = (v.i / p.stride) * 6;
-        const [h, s, val] = rgbToHsv(vt[k6 + 3], vt[k6 + 4], vt[k6 + 5]);
+        const crEff = p.colorRandom + (obj.crV - p.colorRandom) * obj.crW;
+        const cr2 = Math.max(0, Math.min(1, crEff));
+        const rr = vt[k6 + 3] * (1 - cr2) + v.rgbRand[0] * cr2;
+        const gg = vt[k6 + 4] * (1 - cr2) + v.rgbRand[1] * cr2;
+        const bb = vt[k6 + 5] * (1 - cr2) + v.rgbRand[2] * cr2;
+        const [h, s, val] = rgbToHsv(rr, gg, bb);
         const wheelPos = h * n;
         v.capTableA = Math.floor(wheelPos) % n;
         v.capTableB = (v.capTableA + 1) % n;
@@ -287,7 +297,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       const vt = this.voiceTargets;
       this.spatialize(vt[k6], vt[k6 + 1], vt[k6 + 2], spat);
       const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
-      v.capAmp = 0.13 * v.capBright * mag;
+      v.capAmp = 0.13 * v.capBright * mag * obj.gain;
       v.capPanL = spat[0] / mag;
       v.capPanR = spat[1] / mag;
     } else {
@@ -320,9 +330,17 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const t0 = currentTime + this.smoothOffset;
     const dt = 1 / sampleRate;
     // the ONE envelope, same math as the GPU: smear -> steepness k,
-    // asymmetry -> age-warp c (peak early = appearing, late = vanishing)
+    // asymmetry -> age-warp c (peak early = appearing, late = vanishing);
+    // objects may impose their own shape on captured matter
     const envK = 0.25 + p.smear * p.smear * 2.75;
     const envC = Math.pow(2, p.asymmetry * 1.5);
+    const objEnv = [];
+    for (let m = 0; m < p.objects.length; m++) {
+      const o = p.objects[m];
+      const sm = p.smear + (o.smearV - p.smear) * o.smearW;
+      const as = p.asymmetry + (o.asymV - p.asymmetry) * o.asymW;
+      objEnv[m] = { k: 0.25 + sm * sm * 2.75, c: Math.pow(2, as * 1.5) };
+    }
     const spat = [0, 0];
     const sine = this.sine;
     let active = 0;
@@ -374,8 +392,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             : (xF - gFn - v.offN) / v.durN;
           let env = 0;
           if (aa > 0 && aa < 1) {
-            const uw = Math.pow(aa, envC);
-            env = Math.pow(4 * uw * (1 - uw), envK);
+            const eK = captured ? objEnv[v.objSlot].k : envK;
+            const eC = captured ? objEnv[v.objSlot].c : envC;
+            const uw = Math.pow(aa, eC);
+            env = Math.pow(4 * uw * (1 - uw), eK);
           }
           if (env > 0) {
             const idx = v.phase & TABLE_MASK;

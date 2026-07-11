@@ -94,7 +94,15 @@ export class ParticleField {
     Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(0.02, 0.02, 0, 0)),
   );
   private readonly uObjD = uniformArray(
-    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(1, 1, 1, 0)),
+    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(1, 1, 1, 0.5)),
+  );
+  // E: (colorRandomV, colorRandomW·level, sizeRandomV, sizeRandomW·level)
+  private readonly uObjE = uniformArray(
+    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(0, 0, 0.5, 0)),
+  );
+  // F: (smearK_obj, asymC_obj, smearW·level, asymW·level)
+  private readonly uObjF = uniformArray(
+    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(0.94, 1, 0, 0)),
   );
 
   constructor(count: number, targetTexture: THREE.DataTexture) {
@@ -156,6 +164,10 @@ export class ParticleField {
     const oC = vec4(this.uObjC.element(slotIdx) as any);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const oD = vec4(this.uObjD.element(slotIdx) as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oE = vec4(this.uObjE.element(slotIdx) as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oF = vec4(this.uObjF.element(slotIdx) as any);
     const tauObj = oC.x.max(0.0005);
 
     // the object's clock: sync blends each particle's private phase toward
@@ -189,27 +201,30 @@ export class ParticleField {
 
     // The ONE envelope, two senses: smear = window steepness (k), asymmetry
     // = attack/decay skew via age-warp (c). Identical math in the worklet.
+    // Objects may impose their own envelope shape on captured matter.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const envFn = (aa: any) => {
-      const uw = pow(clamp(aa, 0, 1), this.uAsymC);
+    const envFn = (aa: any, k: any, c: any) => {
+      const uw = pow(clamp(aa, 0, 1), c);
       const core = uw.mul(float(1).sub(uw)).mul(4).max(0);
-      return pow(core, this.uSmearK);
+      return pow(core, k);
     };
 
     // free burst envelope: sampled per frame — random phases make display
     // aliasing read as sparkle, which IS the noise aesthetic
-    const envFree = envFn(a).mul(aliveFree);
+    const envFree = envFn(a, this.uSmearK, this.uAsymC).mul(aliveFree);
 
     // captured envelope: the frame is a camera EXPOSURE, not a sample —
     // stratified sampling of the object's pulse over [t, t+dt] so coherent
     // clouds cannot strobe against the refresh rate (a foreign clock).
+    const kCap = mix(this.uSmearK, oF.x, oF.z);
+    const cCap = mix(this.uAsymC, oF.y, oF.w);
     const dx = this.uDeltaTime.div(tauObj);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let acc: any = float(0);
     const EXPOSURE_SAMPLES = 8;
     for (let s = 0; s < EXPOSURE_SAMPLES; s++) {
       const aCap = fract(xO.add(dx.mul((s + 0.5) / EXPOSURE_SAMPLES))).div(0.6);
-      acc = acc.add(envFn(aCap));
+      acc = acc.add(envFn(aCap, kCap, cCap));
     }
     const meanEnvCap = acc.div(EXPOSURE_SAMPLES);
 
@@ -226,9 +241,11 @@ export class ParticleField {
     // size is constant during a burst — the flash lives in the light, not
     // the geometry; free bursts gate on/off, captured stay lit and pulse.
     // sizeRandom is the dispersion dial: 0 = uniform size (one pitch).
+    // objects may impose their own size dispersion (pitch spread)
+    const srEff = mix(this.uSizeRandom, oE.z, oE.w.mul(captured));
     const sizeJitter = hash(i.add(uint(404)))
       .sub(0.5)
-      .mul(this.uSizeRandom.mul(0.7))
+      .mul(srEff.mul(0.7))
       .add(0.85);
     // an object may impose its register on captured matter (size = pitch)
     const effSize = mix(this.uSize, oC.y, oC.z.mul(captured));
@@ -246,17 +263,21 @@ export class ParticleField {
     );
     const ambientCol = mix(this.uTint, randomColor, this.uColorRandom);
     // captured matter takes the object's tint (or the image's own pixel
-    // color, which overrides fully — the image IS its colors)
-    const capturedTint = mix(oD.xyz, colTexel.xyz, colTexel.w);
+    // color, which overrides fully — the image IS its colors), scattered
+    // by the object's own color dispersion
+    const crEff = mix(this.uColorRandom, oE.x, oE.y.mul(captured));
+    const capturedTint = mix(mix(oD.xyz, colTexel.xyz, colTexel.w), randomColor, crEff);
     const tintMixW = oC.w.max(colTexel.w.mul(oA.w)).mul(captured);
     const col = mix(ambientCol, capturedTint, tintMixW);
     material.colorNode = col
       .mul(bright.mul(0.9).add(0.05))
       .mul(captured.mul(0.8).add(1));
 
-    // smear also softens the flash in SPACE: the same window, spatially
+    // smear also softens the flash in SPACE: the same window, spatially;
+    // captured matter may take the object's smear (raw value in D.w)
+    const smearEff = mix(this.uSmear, oD.w, oF.z.mul(captured));
     const d = length(uv().sub(0.5));
-    const innerEdge = mix(float(0.38), float(0.02), this.uSmear);
+    const innerEdge = mix(float(0.38), float(0.02), smearEff);
     material.opacityNode = smoothstep(innerEdge, 0.5, d).oneMinus().mul(0.85);
 
     this.mesh = new THREE.Sprite(material);
@@ -286,6 +307,8 @@ export class ParticleField {
     const B = this.uObjB.array as THREE.Vector4[];
     const C = this.uObjC.array as THREE.Vector4[];
     const D = this.uObjD.array as THREE.Vector4[];
+    const E = this.uObjE.array as THREE.Vector4[];
+    const F = this.uObjF.array as THREE.Vector4[];
     for (let m = 0; m < SLOT_COUNT; m++) {
       const inst = manager.slots[m];
       if (!inst || !inst.cloud || inst.level <= 0.001) {
@@ -308,7 +331,19 @@ export class ParticleField {
         p.scale.weight * inst.level,
         p.tintWeight * inst.level,
       );
-      D[m].set(p.tintR, p.tintG, p.tintB, 0);
+      D[m].set(p.tintR, p.tintG, p.tintB, p.smear.value);
+      E[m].set(
+        p.colorRandom.value,
+        p.colorRandom.weight * inst.level,
+        p.sizeRandom.value,
+        p.sizeRandom.weight * inst.level,
+      );
+      F[m].set(
+        smearToK(p.smear.value),
+        asymmetryToC(p.asymmetry.value),
+        p.smear.weight * inst.level,
+        p.asymmetry.weight * inst.level,
+      );
     }
   }
 

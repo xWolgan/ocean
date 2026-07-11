@@ -57,8 +57,18 @@ export interface ObjectPatch {
   tintG: number;
   tintB: number;
   tintWeight: number;
+  /** Timbre scatter of captured matter. */
+  colorRandom: Weighted;
+  /** Pitch spread of captured matter. */
+  sizeRandom: Weighted;
+  /** Envelope softness of captured matter. */
+  smear: Weighted;
+  /** Envelope skew of captured matter (appear ↔ vanish). */
+  asymmetry: Weighted;
   /** Phase-lock amount: 0 = textured cloud, 1 = unison pulse (tone). */
   sync: number;
+  /** The object's own volume (audio). */
+  gain: number;
 }
 
 export interface ObjectDef {
@@ -87,7 +97,30 @@ export function defaultPatch(): ObjectPatch {
     tintG: 0.9,
     tintB: 1.0,
     tintWeight: 0.5,
+    // weight 0 = transparent: a fresh object inherits the environment's
+    // dispersions/envelope until the composer dials its own in
+    colorRandom: { value: 0.0, weight: 0 },
+    sizeRandom: { value: 0.5, weight: 0 },
+    smear: { value: 0.5, weight: 0 },
+    asymmetry: { value: 0.0, weight: 0 },
     sync: 1.0,
+    gain: 1.0,
+  };
+}
+
+/** Fill missing patch fields (older saved scenes) with defaults. */
+export function normalizePatch(patch: Partial<ObjectPatch> | undefined): ObjectPatch {
+  const d = defaultPatch();
+  if (!patch) return d;
+  return {
+    ...d,
+    ...patch,
+    lifespan: { ...d.lifespan, ...patch.lifespan },
+    scale: { ...d.scale, ...patch.scale },
+    colorRandom: { ...d.colorRandom, ...patch.colorRandom },
+    sizeRandom: { ...d.sizeRandom, ...patch.sizeRandom },
+    smear: { ...d.smear, ...patch.smear },
+    asymmetry: { ...d.asymmetry, ...patch.asymmetry },
   };
 }
 

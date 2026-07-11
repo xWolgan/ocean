@@ -103,19 +103,28 @@ export function createPanel(
     tuning.add(p.lifespan, 'weight', 0, 1, 0.01).name('  ↳ weight');
     tuning.add(p.scale, 'value', 0, 1, 0.001).name('scale (register)');
     tuning.add(p.scale, 'weight', 0, 1, 0.01).name('  ↳ weight');
-    const tint = {
-      get color() {
-        return { r: p.tintR, g: p.tintG, b: p.tintB };
-      },
-      set color(c: { r: number; g: number; b: number }) {
+    // a persistent proxy object: lil-gui mutates it in place, onChange
+    // copies into the patch (a getter returning copies never writes back)
+    const tint = { color: { r: p.tintR, g: p.tintG, b: p.tintB } };
+    tuning
+      .addColor(tint, 'color')
+      .name('tint')
+      .onChange((c: { r: number; g: number; b: number }) => {
         p.tintR = c.r;
         p.tintG = c.g;
         p.tintB = c.b;
-      },
-    };
-    tuning.addColor(tint, 'color').name('tint');
+      });
     tuning.add(p, 'tintWeight', 0, 1, 0.01).name('  ↳ weight');
+    tuning.add(p.colorRandom, 'value', 0, 1, 0.001).name('color random (timbre)');
+    tuning.add(p.colorRandom, 'weight', 0, 1, 0.01).name('  ↳ weight');
+    tuning.add(p.sizeRandom, 'value', 0, 1, 0.001).name('size random (pitch spread)');
+    tuning.add(p.sizeRandom, 'weight', 0, 1, 0.01).name('  ↳ weight');
+    tuning.add(p.smear, 'value', 0, 1, 0.001).name('smear');
+    tuning.add(p.smear, 'weight', 0, 1, 0.01).name('  ↳ weight');
+    tuning.add(p.asymmetry, 'value', -1, 1, 0.001).name('asymmetry');
+    tuning.add(p.asymmetry, 'weight', 0, 1, 0.01).name('  ↳ weight');
     tuning.add(p, 'sync', 0, 1, 0.01).name('sync (cloud ↔ tone)');
+    tuning.add(p, 'gain', 0, 1.5, 0.01).name('gain (this object)');
     tuning
       .add(
         {
