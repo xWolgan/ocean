@@ -130,6 +130,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.blockCounter = 0;
     this.paramsDirty = true;
     this.attSpat = [0, 0];
+    // smoothed app-clock offset: raw values jitter by scheduling noise
+    // (±ms, 60x/sec) which would warp every envelope's timeline
+    this.smoothOffset = null;
     // rumble-blocker high-pass state
     this.hpXL = 0;
     this.hpXR = 0;
@@ -192,7 +195,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         Math.max(p.registerHz * Math.pow(2, (0.85 - v.sizeJitter) * 2.2), 30),
         sampleRate * 0.45,
       );
-      v.gen = -1e18; // refresh per-generation state
+      // NOTE: never reset v.gen/v.phase here — parameter updates arrive on
+      // the 60Hz control clock, which does not belong to this universe.
+      // Touching a running grain's phase clicks 60x/sec (the "trrrr").
+      // New amp/pan simply take effect at each voice's next natural birth.
     }
   }
 
@@ -241,8 +247,17 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       this.refreshDerived();
     }
 
+    // slew the clock offset: hard resync only on a real jump, otherwise
+    // creep at ~18ms/s — inaudible, but tracks perf-vs-audio clock drift
+    if (this.smoothOffset === null || Math.abs(p.timeOffset - this.smoothOffset) > 0.05) {
+      this.smoothOffset = p.timeOffset;
+    } else {
+      const d = p.timeOffset - this.smoothOffset;
+      this.smoothOffset += Math.max(-5e-5, Math.min(5e-5, d));
+    }
+
     const invTau = 1 / p.tau;
-    const t0 = currentTime + p.timeOffset;
+    const t0 = currentTime + this.smoothOffset;
     const dt = 1 / sampleRate;
     const spat = [0, 0];
     const sine = this.sine;
