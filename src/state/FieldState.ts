@@ -33,9 +33,11 @@ export interface FieldState {
   /** Overall tint of the substance (visual). */
   tint: Color;
   /** 0..1 — color scatter between particles: 0 = uniform tint, 1 = fully
-   *  random. Audibly: the color of the noise — 0 = one spectral band,
-   *  1 = grains scattered over the whole spectrum (white). */
+   *  random. Audibly: timbre/brightness scatter across the field. */
   colorRandom: number;
+  /** 0..1 — size scatter between particles. Audibly: pitch spread —
+   *  0 = every grain at the register pitch (one tone), 1 = ~1.5 octaves. */
+  sizeRandom: number;
   /** 0..1 — mortality: mean particle lifetime ~0.3s .. ~30s. Constant
    *  population, tunable turnover. Audibly: grain duration. */
   lifespan: number;
@@ -56,6 +58,7 @@ export function createFieldState(): FieldState {
     scale: 0.4,
     tint: new Color(0.75, 0.78, 0.85),
     colorRandom: 0.5,
+    sizeRandom: 1.0,
     lifespan: 0.7,
     gain: 0.5,
     attractor: {

@@ -28,7 +28,11 @@ export function createPanel(
 
   const color = gui.addFolder('color');
   color.addColor(state, 'tint').name('tint (hue→timbre, sat→richness)').listen();
-  color.add(state, 'colorRandom', 0, 1, 0.001).name('randomness').listen();
+
+  // dispersions: each property of the substance has a mean and a scatter
+  const rand = gui.addFolder('randomness');
+  rand.add(state, 'colorRandom', 0, 1, 0.001).name('color (timbre)').listen();
+  rand.add(state, 'sizeRandom', 0, 1, 0.001).name('size (pitch spread)').listen();
 
   const attractor = gui.addFolder('attractor');
   attractor.add(state.attractor, 'radius', 0.2, 3, 0.01).name('radius');

@@ -81,7 +81,7 @@ class Voice {
     this.slotJitter = 0.5 + pcg(index + 808); // free-timeline slot-period jitter
     this.phi = pcg(index + 909); // free-timeline phase
     this.poolRoll = pcg(index + 747); // attractor pool lottery
-    this.sizeJitter = pcg(index + 404) * 0.7 + 0.5; // same as GPU size jitter
+    this.sizeRoll = pcg(index + 404); // same roll the GPU sizes sprites with
     this.rgbRand = [pcg(index + 601), pcg(index + 602), pcg(index + 603)];
 
     // derived on params change
@@ -112,6 +112,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       density: 0.55,
       registerHz: 800,
       colorRandom: 0.5,
+      sizeRandom: 1.0,
       tint: [0.75, 0.78, 0.85],
       gain: 0.5,
       timeOffset: 0,
@@ -190,9 +191,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       v.tableFrac = wheelPos - Math.floor(wheelPos);
       v.sat = s;
       v.bright = 0.35 + 0.65 * val;
-      // size -> pitch, big = low (same jitter the GPU uses for sprite size)
+      // size -> pitch, big = low (same jitter the GPU uses for sprite size);
+      // sizeRandom is the dispersion: 0 = uniform size = one tone
+      const sizeJitter = (v.sizeRoll - 0.5) * 0.7 * p.sizeRandom + 0.85;
       v.freq = Math.min(
-        Math.max(p.registerHz * Math.pow(2, (0.85 - v.sizeJitter) * 2.2), 30),
+        Math.max(p.registerHz * Math.pow(2, (0.85 - sizeJitter) * 2.2), 30),
         sampleRate * 0.45,
       );
       // NOTE: never reset v.gen/v.phase here — parameter updates arrive on

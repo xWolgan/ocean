@@ -70,6 +70,7 @@ export class ParticleField {
   private readonly uSize = uniform(0.02);
   private readonly uTint = uniform(new THREE.Vector3(0.75, 0.78, 0.85));
   private readonly uColorRandom = uniform(0.5);
+  private readonly uSizeRandom = uniform(1.0);
   private readonly uAttractorPos = uniform(new THREE.Vector3(0, 1.5, 0));
   private readonly uAttractorRadius = uniform(1.0);
   private readonly uAttractorStrength = uniform(0.0);
@@ -174,8 +175,12 @@ export class ParticleField {
     material.positionNode = position;
 
     // size is constant during a burst — the flash lives in the light, not
-    // the geometry; free bursts gate on/off, captured stay lit and pulse
-    const sizeJitter = hash(i.add(uint(404))).mul(0.7).add(0.5);
+    // the geometry; free bursts gate on/off, captured stay lit and pulse.
+    // sizeRandom is the dispersion dial: 0 = uniform size (one pitch).
+    const sizeJitter = hash(i.add(uint(404)))
+      .sub(0.5)
+      .mul(this.uSizeRandom.mul(0.7))
+      .add(0.85);
     material.scaleNode = this.uSize
       .mul(sizeJitter)
       .mul(mix(aliveFree, float(1), captured));
@@ -211,6 +216,7 @@ export class ParticleField {
     this.uSize.value = 0.006 + state.scale * 0.045;
     this.uTint.value.set(state.tint.r, state.tint.g, state.tint.b);
     this.uColorRandom.value = state.colorRandom;
+    this.uSizeRandom.value = state.sizeRandom;
     this.uAttractorPos.value.copy(state.attractor.position);
     this.uAttractorRadius.value = state.attractor.radius;
     this.uAttractorStrength.value = state.attractor.strength;

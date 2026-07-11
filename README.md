@@ -81,7 +81,7 @@ therefore also the pitch axis: 100 ms = 10 Hz pulse, 1 ms = 1 kHz tone.
   |---|---|
   | amplitude | brightness |
   | duration | lifespan |
-  | content pitch | size (big = low) |
+  | content pitch | size (big = low; sizeRandom = pitch spread, 0 = one tone) |
   | secondary tones: amount | saturation |
   | secondary tones: recipe | hue (circular timbre wheel) |
   | spatial position | itself (pan + distance) |
