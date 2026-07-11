@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OCEAN — The Substance</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #000004; }
+      canvas { display: block; }
+      #stats {
+        position: fixed; top: 10px; left: 10px; z-index: 10;
+        color: #9fb8c8; font: 11px/1.6 'Consolas', monospace;
+        pointer-events: none; white-space: pre; text-shadow: 0 0 4px #000;
+      }
+      #hint {
+        position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+        color: #56707e; font: 12px 'Consolas', monospace; z-index: 10;
+        pointer-events: none; transition: opacity 2s; text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stats"></div>
+    <div id="hint">move: aim the attractor · hold left mouse: condense · right-drag: orbit · first click enables sound</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
