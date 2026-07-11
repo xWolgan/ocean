@@ -8,8 +8,11 @@ import { ParticleField } from './field/ParticleField';
 import { AudioEngine } from './audio/AudioEngine';
 import { Interaction } from './input/Interaction';
 import { createPanel } from './ui/Panel';
+import { ObjectManager } from './objects/ObjectManager';
+import { createObjectDef } from './objects/ObjectDef';
 
 const bus = new ModulationBus();
+const objects = new ObjectManager();
 const settings = { particleCount: 1 << 17 };
 
 const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -40,19 +43,22 @@ controls.mouseButtons = {
   RIGHT: THREE.MOUSE.ROTATE,
 };
 
-let field = new ParticleField(settings.particleCount);
+let field = new ParticleField(settings.particleCount, objects.targetTexture);
 scene.add(field.mesh);
 
 function setParticleCount(count: number): void {
   scene.remove(field.mesh);
   field.dispose();
-  field = new ParticleField(count);
+  field = new ParticleField(count, objects.targetTexture);
   scene.add(field.mesh);
 }
 
+// the first instrument: a point object at the field's heart
+void objects.add(createObjectDef({ kind: 'point', position: [0, 1.5, 0], sigma: 0.3 }));
+
 const audio = new AudioEngine();
-const interaction = new Interaction(camera, bus, renderer.domElement);
-createPanel(bus, interaction, settings, setParticleCount);
+const interaction = new Interaction(camera, bus, objects, renderer.domElement);
+createPanel(bus, interaction, objects, settings, setParticleCount);
 
 document.body.appendChild(XRButton.createButton(renderer));
 
@@ -74,7 +80,7 @@ let statsTimer = 0;
 
 // dev hook for automated verification and console experiments
 Object.assign(window, {
-  __ocean: { bus, state: bus.out, audio, renderer, get field() { return field; } },
+  __ocean: { bus, objects, state: bus.out, audio, renderer, get field() { return field; } },
 });
 console.log('[ocean] backend:', renderer.backend.constructor.name);
 
@@ -106,8 +112,12 @@ renderer.setAnimationLoop((now: number) => {
 
   interaction.update(dt);
   bus.update();
+  // the touch signal gates the selected object — playing an instrument
+  objects.touchGate = bus.source('playerA.touch').value;
+  objects.update(dt);
   field.update(bus.out, tSec, dt);
-  audio.update(bus.out, camera, tSec, field.sonicStride);
+  field.updateObjects(objects, bus.out.scale);
+  audio.update(bus.out, camera, tSec, field.sonicStride, objects);
   controls.update();
 
   renderer.render(scene, camera);

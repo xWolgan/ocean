@@ -1,11 +1,14 @@
 import * as THREE from 'three/webgpu';
 import {
   uniform,
+  uniformArray,
   instanceIndex,
   hash,
   uint,
   float,
   vec3,
+  vec4,
+  ivec2,
   uv,
   mix,
   clamp,
@@ -15,9 +18,12 @@ import {
   step,
   fract,
   floor,
+  textureLoad,
 } from 'three/tsl';
 import type { FieldState } from '../state/FieldState';
 import { FIELD_CENTER, FIELD_HALF_EXTENTS } from '../state/FieldState';
+import { TARGETS_PER_OBJECT } from '../objects/generators';
+import { SLOT_COUNT, type ObjectManager } from '../objects/ObjectManager';
 
 /**
  * The substance, v3: a stochastic point process rendered twice.
@@ -42,8 +48,6 @@ import { FIELD_CENTER, FIELD_HALF_EXTENTS } from '../state/FieldState';
 /** Number of particles the audio engine samples (mirrors these hashes). */
 export const SONIC_COUNT = 256;
 
-/** Fraction of all particles the attractor may capture at full strength. */
-export const POOL_FRACTION = 0.04;
 
 /**
  * Bit-exact JS replica of TSL's hash() (PCG, pcg-random.org). The audio
@@ -75,11 +79,25 @@ export class ParticleField {
   private readonly uSmear = uniform(0.5);
   private readonly uSmearK = uniform(0.94);
   private readonly uAsymC = uniform(1.0);
-  private readonly uAttractorPos = uniform(new THREE.Vector3(0, 1.5, 0));
-  private readonly uAttractorRadius = uniform(1.0);
-  private readonly uAttractorStrength = uniform(0.0);
+  // per-object-slot uniforms (8 slots):
+  // A: (lottery = claim·level, smearSigma, sync, level)
+  // B: (centerX, centerY, centerZ, reach)
+  // C: (tauObj, objSizeBase, sizeWeight·level, tintWeight·level)
+  // D: (tintR, tintG, tintB, unused)
+  private readonly uObjA = uniformArray(
+    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(0, 0.05, 1, 0)),
+  );
+  private readonly uObjB = uniformArray(
+    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(0, 1.5, 0, 0)),
+  );
+  private readonly uObjC = uniformArray(
+    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(0.02, 0.02, 0, 0)),
+  );
+  private readonly uObjD = uniformArray(
+    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(1, 1, 1, 0)),
+  );
 
-  constructor(count: number) {
+  constructor(count: number, targetTexture: THREE.DataTexture) {
     this.count = count;
     this.sonicStride = Math.max(1, Math.floor(count / SONIC_COUNT));
 
@@ -125,25 +143,46 @@ export class ParticleField {
       .mul(a)
       .mul(slotPeriod.mul(durN));
 
-    // --- locked timeline: the attractor's shared clock at rate 1/tau ---
-    const xL = this.uTime.div(this.uTau);
+    // --- objects: each particle belongs to ONE pool slot; the object in
+    // that slot may capture it (per-cycle lottery scaled by its envelope
+    // level, gated by its influence reach around the free position).
     const poolRoll = hash(i.add(uint(747)));
-    const captured = step(poolRoll, this.uAttractorStrength.mul(POOL_FRACTION));
-    // frozen randomness: the captured cloud keeps the SAME shape every
-    // cycle (no generation in the hash) — order is repetition, and its
-    // audio twin replays the same frozen-noise waveform each cycle
-    const capturedDir = vec3(
+    const slotIdx = floor(poolRoll.mul(SLOT_COUNT)).min(SLOT_COUNT - 1).toInt();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oA = vec4(this.uObjA.element(slotIdx) as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oB = vec4(this.uObjB.element(slotIdx) as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oC = vec4(this.uObjC.element(slotIdx) as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oD = vec4(this.uObjD.element(slotIdx) as any);
+    const tauObj = oC.x.max(0.0005);
+
+    // the object's clock: sync blends each particle's private phase toward
+    // the shared one — 0 = textured cloud at the object's rate, 1 = unison
+    const phiObj = hash(i.add(uint(909))).mul(float(1).sub(oA.z));
+    const xO = this.uTime.div(tauObj).add(phiObj);
+    const gO = floor(xO);
+    const lotterySalt = uint(431).add(uint(SLOT_COUNT).mul(0)).add(slotIdx.toUint().mul(uint(17)));
+    const lotteryRoll = hash(
+      i.mul(uint(1009)).add(gO.toUint().mul(uint(9176))).add(lotterySalt),
+    );
+    const inReach = step(length(freePos.sub(oB.xyz)), oB.w);
+    const captured = step(lotteryRoll, oA.x).mul(inReach);
+
+    // the constellation: this particle's stable target in the object's cloud
+    const tIdx = floor(hash(i.add(uint(517))).mul(TARGETS_PER_OBJECT)).toInt();
+    const rowPos = slotIdx.mul(2);
+    const posTexel = textureLoad(targetTexture, ivec2(tIdx, rowPos));
+    const colTexel = textureLoad(targetTexture, ivec2(tIdx, rowPos.add(1)));
+    const jitter = vec3(
       hash(i.add(uint(761))),
       hash(i.add(uint(862))),
       hash(i.add(uint(963))),
     )
       .sub(0.5)
-      .add(0.0001)
-      .normalize();
-    const capturedRad = hash(i.add(uint(964)))
-      .pow(1 / 3)
-      .mul(this.uAttractorRadius.mul(0.5));
-    const capturedPos = this.uAttractorPos.add(capturedDir.mul(capturedRad));
+      .mul(oA.y.mul(2));
+    const capturedPos = posTexel.xyz.add(jitter);
 
     // --- choose timeline per particle ---
     const position = mix(freePos.add(drift), capturedPos, captured);
@@ -162,14 +201,14 @@ export class ParticleField {
     const envFree = envFn(a).mul(aliveFree);
 
     // captured envelope: the frame is a camera EXPOSURE, not a sample —
-    // stratified sampling of the pulse over [t, t+dt] so the coherent
-    // cloud cannot strobe against the refresh rate (a foreign clock).
-    const dx = this.uDeltaTime.div(this.uTau);
+    // stratified sampling of the object's pulse over [t, t+dt] so coherent
+    // clouds cannot strobe against the refresh rate (a foreign clock).
+    const dx = this.uDeltaTime.div(tauObj);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let acc: any = float(0);
     const EXPOSURE_SAMPLES = 8;
     for (let s = 0; s < EXPOSURE_SAMPLES; s++) {
-      const aCap = fract(xL.add(dx.mul((s + 0.5) / EXPOSURE_SAMPLES))).div(0.6);
+      const aCap = fract(xO.add(dx.mul((s + 0.5) / EXPOSURE_SAMPLES))).div(0.6);
       acc = acc.add(envFn(aCap));
     }
     const meanEnvCap = acc.div(EXPOSURE_SAMPLES);
@@ -191,7 +230,9 @@ export class ParticleField {
       .sub(0.5)
       .mul(this.uSizeRandom.mul(0.7))
       .add(0.85);
-    material.scaleNode = this.uSize
+    // an object may impose its register on captured matter (size = pitch)
+    const effSize = mix(this.uSize, oC.y, oC.z.mul(captured));
+    material.scaleNode = effSize
       .mul(sizeJitter)
       .mul(mix(aliveFree, float(1), captured));
 
@@ -203,7 +244,12 @@ export class ParticleField {
       hash(i.add(uint(602))),
       hash(i.add(uint(603))),
     );
-    const col = mix(this.uTint, randomColor, this.uColorRandom);
+    const ambientCol = mix(this.uTint, randomColor, this.uColorRandom);
+    // captured matter takes the object's tint (or the image's own pixel
+    // color, which overrides fully — the image IS its colors)
+    const capturedTint = mix(oD.xyz, colTexel.xyz, colTexel.w);
+    const tintMixW = oC.w.max(colTexel.w.mul(oA.w)).mul(captured);
+    const col = mix(ambientCol, capturedTint, tintMixW);
     material.colorNode = col
       .mul(bright.mul(0.9).add(0.05))
       .mul(captured.mul(0.8).add(1));
@@ -232,9 +278,38 @@ export class ParticleField {
     this.uSmear.value = state.smear;
     this.uSmearK.value = smearToK(state.smear);
     this.uAsymC.value = asymmetryToC(state.asymmetry);
-    this.uAttractorPos.value.copy(state.attractor.position);
-    this.uAttractorRadius.value = state.attractor.radius;
-    this.uAttractorStrength.value = state.attractor.strength;
+  }
+
+  /** Copy per-slot object state into the shader uniform arrays. */
+  updateObjects(manager: ObjectManager, ambientScale: number): void {
+    const A = this.uObjA.array as THREE.Vector4[];
+    const B = this.uObjB.array as THREE.Vector4[];
+    const C = this.uObjC.array as THREE.Vector4[];
+    const D = this.uObjD.array as THREE.Vector4[];
+    for (let m = 0; m < SLOT_COUNT; m++) {
+      const inst = manager.slots[m];
+      if (!inst || !inst.cloud || inst.level <= 0.001) {
+        A[m].set(0, 0.05, 1, 0);
+        continue;
+      }
+      const p = inst.def.patch;
+      A[m].set(inst.def.claim * inst.level, inst.def.spatialSmear, p.sync, inst.level);
+      B[m].set(
+        inst.cloud.center.x,
+        inst.cloud.center.y,
+        inst.cloud.center.z,
+        inst.cloud.boundRadius + inst.def.influenceRadius,
+      );
+      const ambientSize = 0.006 + ambientScale * 0.045;
+      const objSize = 0.006 + p.scale.value * 0.045;
+      C[m].set(
+        lifespanToTau(p.lifespan.value),
+        ambientSize + (objSize - ambientSize) * p.scale.weight,
+        p.scale.weight * inst.level,
+        p.tintWeight * inst.level,
+      );
+      D[m].set(p.tintR, p.tintG, p.tintB, 0);
+    }
   }
 
   dispose(): void {

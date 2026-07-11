@@ -1,4 +1,4 @@
-import { Color, Vector3 } from 'three/webgpu';
+import { Color } from 'three/webgpu';
 import type { FieldState } from './FieldState';
 import { createFieldState } from './FieldState';
 
@@ -32,9 +32,7 @@ export type ParamId =
   | 'tintB'
   | 'colorRandom'
   | 'sizeRandom'
-  | 'gain'
-  | 'attractorRadius'
-  | 'attractorStrength';
+  | 'gain';
 
 const RANGES: Record<ParamId, [number, number]> = {
   density: [0, 1],
@@ -49,8 +47,6 @@ const RANGES: Record<ParamId, [number, number]> = {
   colorRandom: [0, 1],
   sizeRandom: [0, 1],
   gain: [0, 1],
-  attractorRadius: [0.2, 3],
-  attractorStrength: [0, 1],
 };
 
 /** A control signal. Anything may write `value` each frame. */
@@ -71,8 +67,6 @@ export class ModulationBus {
   readonly base: Record<ParamId, number>;
   /** Base tint as a color object (mirrors tintR/G/B for the color picker). */
   readonly baseTint = new Color(0.75, 0.78, 0.85);
-  /** Spatial pass-through: pointers aren't scalars (yet). */
-  readonly attractorPosition = new Vector3(0, 1.5, 0);
 
   readonly routes: Route[] = [];
   private readonly sources = new Map<string, Source>();
@@ -95,8 +89,6 @@ export class ModulationBus {
       colorRandom: this.out.colorRandom,
       sizeRandom: this.out.sizeRandom,
       gain: this.out.gain,
-      attractorRadius: this.out.attractor.radius,
-      attractorStrength: 0,
     };
   }
 
@@ -145,8 +137,5 @@ export class ModulationBus {
     o.colorRandom = resolved.colorRandom;
     o.sizeRandom = resolved.sizeRandom;
     o.gain = resolved.gain;
-    o.attractor.radius = resolved.attractorRadius;
-    o.attractor.strength = resolved.attractorStrength;
-    o.attractor.position.copy(this.attractorPosition);
   }
 }

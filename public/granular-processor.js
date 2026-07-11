@@ -80,9 +80,23 @@ class Voice {
     this.i = index; // real particle index
     this.slotJitter = 0.5 + pcg(index + 808); // free-timeline slot-period jitter
     this.phi = pcg(index + 909); // free-timeline phase
-    this.poolRoll = pcg(index + 747); // attractor pool lottery
+    this.poolRoll = pcg(index + 747); // object pool-slot lottery
+    this.objSlot = Math.min(7, Math.floor(pcg(index + 747) * 8));
     this.sizeRoll = pcg(index + 404); // same roll the GPU sizes sprites with
     this.rgbRand = [pcg(index + 601), pcg(index + 602), pcg(index + 603)];
+    // captured-voice state (derived from voice targets + object descriptor)
+    this.capFreq = 440;
+    this.capSat = 0;
+    this.capBright = 1;
+    this.capTableA = 0;
+    this.capTableB = 0;
+    this.capTableFrac = 0;
+    this.capGen = -1e18;
+    this.capOn = 0;
+    this.capAmp = 0;
+    this.capPanL = 0.7;
+    this.capPanR = 0.7;
+    this.inReach = false;
 
     // derived on params change
     this.freq = 440;
@@ -118,21 +132,22 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       tint: [0.75, 0.78, 0.85],
       gain: 0.5,
       timeOffset: 0,
-      poolThreshold: 0, // attractor strength * POOL_FRACTION
       listener: [0, 1.7, 4.4],
       right: [1, 0, 0],
       boundsMin: [-3, 0, -3],
       boundsSize: [6, 3, 6],
-      attPos: [0, 1.5, 0],
       stride: 512,
+      // 8 object descriptors: {level, claim, tau, sync, registerHz,
+      // centerX, centerY, centerZ, reach}
+      objects: [],
     };
+    this.voiceTargets = null; // Float32Array [256 × (x,y,z,r,g,b)]
     this.sine = buildTable([[1, 1]]);
     this.wheel = RECIPES.map(buildTable);
     this.voices = [];
     this.builtStride = -1;
     this.blockCounter = 0;
     this.paramsDirty = true;
-    this.attSpat = [0, 0];
     // smoothed app-clock offset: raw values jitter by scheduling noise
     // (±ms, 60x/sec) which would warp every envelope's timeline
     this.smoothOffset = null;
@@ -147,6 +162,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       if (e.data.type === 'params') {
         Object.assign(this.p, e.data.data);
         this.paramsDirty = true;
+      } else if (e.data.type === 'voiceTargets') {
+        this.voiceTargets = e.data.data;
+        this.targetsDirty = true;
       }
     };
   }
@@ -176,7 +194,6 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
 
   refreshDerived() {
     const p = this.p;
-    this.spatialize(p.attPos[0], p.attPos[1], p.attPos[2], this.attSpat);
     const n = this.wheel.length;
     for (let k = 0; k < VOICES; k++) {
       const v = this.voices[k];
@@ -196,10 +213,27 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // size -> pitch, big = low (same jitter the GPU uses for sprite size);
       // sizeRandom is the dispersion: 0 = uniform size = one tone
       const sizeJitter = (v.sizeRoll - 0.5) * 0.7 * p.sizeRandom + 0.85;
-      v.freq = Math.min(
-        Math.max(p.registerHz * Math.pow(2, (0.85 - sizeJitter) * 2.2), 30),
-        sampleRate * 0.45,
-      );
+      const spread = Math.pow(2, (0.85 - sizeJitter) * 2.2);
+      v.freq = Math.min(Math.max(p.registerHz * spread, 30), sampleRate * 0.45);
+
+      // captured-voice tuning: the object's register + the voice's target
+      // color (image pixel or object tint), same hue/sat mapping as ambient
+      const obj = p.objects[v.objSlot];
+      if (obj && this.voiceTargets) {
+        v.capFreq = Math.min(
+          Math.max(obj.registerHz * spread, 30),
+          sampleRate * 0.45,
+        );
+        const vt = this.voiceTargets;
+        const k6 = (v.i / p.stride) * 6;
+        const [h, s, val] = rgbToHsv(vt[k6 + 3], vt[k6 + 4], vt[k6 + 5]);
+        const wheelPos = h * n;
+        v.capTableA = Math.floor(wheelPos) % n;
+        v.capTableB = (v.capTableA + 1) % n;
+        v.capTableFrac = wheelPos - Math.floor(wheelPos);
+        v.capSat = s;
+        v.capBright = 0.35 + 0.65 * val;
+      }
       // NOTE: never reset v.gen/v.phase here — parameter updates arrive on
       // the 60Hz control clock, which does not belong to this universe.
       // Touching a running grain's phase clicks 60x/sec (the "trrrr").
@@ -207,37 +241,55 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     }
   }
 
-  refreshGeneration(v, g, captured, spat) {
+  /** New FREE-timeline generation: renewal process, matching the GPU —
+   *  re-rolled burst duration and a random offset per slot, plus the
+   *  object-reach test for this voice's new free position. */
+  refreshFreeGeneration(v, g, obj, spat) {
     const p = this.p;
     v.gen = g;
-    v.capturedNow = captured;
-    v.phase = 0; // grain starts at zero phase (envelope is zero here — no click)
-
-    if (captured) {
-      const gL = this.attSpat[0];
-      const gR = this.attSpat[1];
-      const mag = Math.sqrt(gL * gL + gR * gR) || 1;
-      v.amp = 0.13 * v.bright * mag;
-      v.panL = gL / mag;
-      v.panR = gR / mag;
+    v.phase = 0;
+    v.durN = h2(v.i, g, 222) * 0.4 + 0.35;
+    v.offN = h2(v.i, g, 111) * (1 - v.durN);
+    const bx = p.boundsMin[0] + h2(v.i, g, 101) * p.boundsSize[0];
+    const by = p.boundsMin[1] + h2(v.i, g, 202) * p.boundsSize[1];
+    const bz = p.boundsMin[2] + h2(v.i, g, 331) * p.boundsSize[2];
+    if (obj) {
+      const dx = bx - obj.centerX;
+      const dy = by - obj.centerY;
+      const dz = bz - obj.centerZ;
+      v.inReach = dx * dx + dy * dy + dz * dz <= obj.reach * obj.reach;
     } else {
-      // renewal process, matching the GPU: re-rolled burst duration and a
-      // random offset in each slot — no fixed repetition interval, no buzz
-      v.durN = h2(v.i, g, 222) * 0.4 + 0.35;
-      v.offN = h2(v.i, g, 111) * (1 - v.durN);
-      const alive = h2(v.i, g, 303) < p.density ? 1 : 0;
-      if (alive) {
-        const bx = p.boundsMin[0] + h2(v.i, g, 101) * p.boundsSize[0];
-        const by = p.boundsMin[1] + h2(v.i, g, 202) * p.boundsSize[1];
-        const bz = p.boundsMin[2] + h2(v.i, g, 331) * p.boundsSize[2];
-        this.spatialize(bx, by, bz, spat);
-        const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
-        v.amp = 0.1 * v.bright * mag;
-        v.panL = spat[0] / mag;
-        v.panR = spat[1] / mag;
-      } else {
-        v.amp = 0;
-      }
+      v.inReach = false;
+    }
+    const alive = h2(v.i, g, 303) < p.density ? 1 : 0;
+    if (alive) {
+      this.spatialize(bx, by, bz, spat);
+      const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
+      v.amp = 0.1 * v.bright * mag;
+      v.panL = spat[0] / mag;
+      v.panR = spat[1] / mag;
+    } else {
+      v.amp = 0;
+    }
+  }
+
+  /** New CAPTURED-timeline generation: the object's per-cycle lottery,
+   *  spatialized at the voice's actual target in the constellation. */
+  refreshCapturedGeneration(v, g, obj, slotSalt, spat) {
+    v.capGen = g;
+    v.phase = 0;
+    v.capOn =
+      v.inReach && h2(v.i, g, slotSalt) < obj.claim * obj.level ? 1 : 0;
+    if (v.capOn && this.voiceTargets) {
+      const k6 = (v.i / this.p.stride) * 6;
+      const vt = this.voiceTargets;
+      this.spatialize(vt[k6], vt[k6 + 1], vt[k6 + 2], spat);
+      const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
+      v.capAmp = 0.13 * v.capBright * mag;
+      v.capPanL = spat[0] / mag;
+      v.capPanR = spat[1] / mag;
+    } else {
+      v.capAmp = 0;
     }
   }
 
@@ -247,8 +299,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const n = outL.length;
     const p = this.p;
     this.ensureVoices();
-    if (this.paramsDirty) {
+    if (this.paramsDirty || this.targetsDirty) {
       this.paramsDirty = false;
+      this.targetsDirty = false;
       this.refreshDerived();
     }
 
@@ -274,33 +327,48 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
 
     for (let k = 0; k < VOICES; k++) {
       const v = this.voices[k];
-      const captured = v.poolRoll < p.poolThreshold;
+      const obj = p.objects[v.objSlot];
+      const objOn = obj && obj.level > 0.001;
+      const slotSalt = 431 + v.objSlot * 17;
       // free slots are 1.8x tau (burst + silent gap), matching the GPU
-      const invL = captured ? invTau : invTau / (v.slotJitter * 1.8);
-      const phi = captured ? 0 : v.phi;
-      const phaseInc = (v.freq / sampleRate) * TABLE_SIZE;
-      const tA = this.wheel[v.tableA];
-      const tB = this.wheel[v.tableB];
-      const tf = v.tableFrac;
-      const sat = v.sat;
+      const invLFree = invTau / (v.slotJitter * 1.8);
+      const invTauObj = objOn ? 1 / obj.tau : 1;
+      const phiObj = objOn ? v.phi * (1 - obj.sync) : 0;
 
       let t = t0;
-      let x = t * invL + phi;
-      let g = Math.floor(x);
-      if (g !== v.gen || captured !== v.capturedNow) {
-        this.refreshGeneration(v, g, captured, spat);
+      // free timeline (always advancing — reach tests live on it)
+      let gF = Math.floor(t * invLFree + v.phi);
+      if (gF !== v.gen) this.refreshFreeGeneration(v, gF, obj, spat);
+      // object timeline
+      if (objOn) {
+        const gO = Math.floor(t * invTauObj + phiObj);
+        if (gO !== v.capGen) this.refreshCapturedGeneration(v, gO, obj, slotSalt, spat);
+      } else {
+        v.capOn = 0;
       }
-      if (v.amp > 0.0002) active++;
+      if ((v.capOn ? v.capAmp : v.amp) > 0.0002) active++;
 
       for (let s = 0; s < n; s++) {
-        x = t * invL + phi;
-        const gNow = Math.floor(x);
-        if (gNow !== v.gen) this.refreshGeneration(v, gNow, captured, spat);
-        if (v.amp > 0.0002) {
-          const local = x - gNow;
-          // captured: duty-gapped pulse on the shared clock (order);
+        const xF = t * invLFree + v.phi;
+        const gFn = Math.floor(xF);
+        if (gFn !== v.gen) this.refreshFreeGeneration(v, gFn, obj, spat);
+
+        let captured = 0;
+        let xO = 0;
+        if (objOn) {
+          xO = t * invTauObj + phiObj;
+          const gOn = Math.floor(xO);
+          if (gOn !== v.capGen) this.refreshCapturedGeneration(v, gOn, obj, slotSalt, spat);
+          captured = v.capOn;
+        }
+
+        const amp = captured ? v.capAmp : v.amp;
+        if (amp > 0.0002) {
+          // captured: duty-gapped pulse on the object's clock (order);
           // free: jittered burst inside its slot (renewal — no clock)
-          const aa = captured ? local / 0.6 : (local - v.offN) / v.durN;
+          const aa = captured
+            ? (xO - v.capGen) / 0.6
+            : (xF - gFn - v.offN) / v.durN;
           let env = 0;
           if (aa > 0 && aa < 1) {
             const uw = Math.pow(aa, envC);
@@ -309,13 +377,18 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           if (env > 0) {
             const idx = v.phase & TABLE_MASK;
             const pure = sine[idx];
+            const tA = this.wheel[captured ? v.capTableA : v.tableA];
+            const tB = this.wheel[captured ? v.capTableB : v.tableB];
+            const tf = captured ? v.capTableFrac : v.tableFrac;
+            const sat = captured ? v.capSat : v.sat;
             const rich = tA[idx] * (1 - tf) + tB[idx] * tf;
             const osc = pure * (1 - sat) + rich * sat;
-            const smp = osc * env * v.amp;
-            outL[s] += smp * v.panL;
-            outR[s] += smp * v.panR;
+            const smp = osc * env * amp;
+            outL[s] += smp * (captured ? v.capPanL : v.panL);
+            outR[s] += smp * (captured ? v.capPanR : v.panR);
           }
-          v.phase = (v.phase + phaseInc) % TABLE_SIZE;
+          const freq = captured ? v.capFreq : v.freq;
+          v.phase = (v.phase + (freq / sampleRate) * TABLE_SIZE) % TABLE_SIZE;
         }
         t += dt;
       }

@@ -1,7 +1,8 @@
 import * as THREE from 'three/webgpu';
 import type { FieldState } from '../state/FieldState';
 import { FIELD_CENTER, FIELD_HALF_EXTENTS } from '../state/FieldState';
-import { POOL_FRACTION, lifespanToTau } from '../field/ParticleField';
+import { lifespanToTau } from '../field/ParticleField';
+import type { ObjectManager } from '../objects/ObjectManager';
 
 const _listener = new THREE.Vector3();
 const _right = new THREE.Vector3();
@@ -20,6 +21,7 @@ export class AudioEngine {
   private ctx: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
   private lastSend = 0;
+  private lastTargetsVersion = -1;
 
   /** Latest audible voice count reported by the worklet, for the overlay. */
   voiceCount = 0;
@@ -51,7 +53,13 @@ export class AudioEngine {
    * @param tSec   the app clock also driving the GPU field
    * @param stride particle index step between sonic samples
    */
-  update(state: FieldState, camera: THREE.Camera, tSec: number, stride: number): void {
+  update(
+    state: FieldState,
+    camera: THREE.Camera,
+    tSec: number,
+    stride: number,
+    objects: ObjectManager,
+  ): void {
     if (!this.node || !this.ctx) return;
     const nowMs = performance.now();
     if (nowMs - this.lastSend < 16) return;
@@ -60,12 +68,21 @@ export class AudioEngine {
     camera.getWorldPosition(_listener);
     _right.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
 
+    const ambientRegisterHz = 180 * Math.pow(20, 1 - state.scale);
+
+    // per-voice targets change only when constellations change
+    if (objects.version !== this.lastTargetsVersion) {
+      this.lastTargetsVersion = objects.version;
+      const vt = objects.voiceTargets(stride);
+      this.node.port.postMessage({ type: 'voiceTargets', data: vt }, [vt.buffer]);
+    }
+
     this.node.port.postMessage({
       type: 'params',
       data: {
         tau: lifespanToTau(state.lifespan),
         density: state.density,
-        registerHz: 180 * Math.pow(20, 1 - state.scale),
+        registerHz: ambientRegisterHz,
         colorRandom: state.colorRandom,
         sizeRandom: state.sizeRandom,
         smear: state.smear,
@@ -74,7 +91,6 @@ export class AudioEngine {
         gain: state.gain,
         // worklet time = currentTime + timeOffset  ==  app tSec
         timeOffset: tSec - this.ctx.currentTime,
-        poolThreshold: state.attractor.strength * POOL_FRACTION,
         listener: [_listener.x, _listener.y, _listener.z],
         right: [_right.x, _right.y, _right.z],
         boundsMin: [
@@ -87,12 +103,8 @@ export class AudioEngine {
           FIELD_HALF_EXTENTS.y * 2,
           FIELD_HALF_EXTENTS.z * 2,
         ],
-        attPos: [
-          state.attractor.position.x,
-          state.attractor.position.y,
-          state.attractor.position.z,
-        ],
         stride,
+        objects: objects.audioDescriptors(ambientRegisterHz),
       },
     });
   }

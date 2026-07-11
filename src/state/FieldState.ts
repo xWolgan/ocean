@@ -14,15 +14,6 @@ import { Color, Vector3 } from 'three/webgpu';
  * All scalar parameters are normalized 0..1; mapping to physical/audible
  * ranges happens at the consumer (ParticleField / granular engine).
  */
-export interface AttractorState {
-  /** World-space position of the attractor. */
-  position: Vector3;
-  /** Radius of influence in meters. */
-  radius: number;
-  /** 0..1 — how strongly the attractor condenses the field. */
-  strength: number;
-}
-
 export interface FieldState {
   /** 0..1 — fraction of the substance that exists. 0 = emptiness. */
   density: number;
@@ -50,7 +41,6 @@ export interface FieldState {
   asymmetry: number;
   /** 0..1 — master audio gain. */
   gain: number;
-  attractor: AttractorState;
 }
 
 /** The playable volume: a room-scale box, standing height at its center. */
@@ -70,10 +60,5 @@ export function createFieldState(): FieldState {
     sizeRandom: 1.0,
     lifespan: 0.7,
     gain: 0.5,
-    attractor: {
-      position: new Vector3(0, 1.5, 0),
-      radius: 1.1,
-      strength: 0,
-    },
   };
 }
