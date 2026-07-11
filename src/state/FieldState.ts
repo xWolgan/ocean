@@ -41,6 +41,10 @@ export interface FieldState {
   asymmetry: number;
   /** 0..1 — master audio gain. */
   gain: number;
+  /** 0..1 — gain of the ambient field's voices (the environment). */
+  fieldGain: number;
+  /** 0..1 — gain of captured/object voices (the instruments). */
+  objectGain: number;
 }
 
 /** The playable volume: a room-scale box, standing height at its center. */
@@ -60,5 +64,7 @@ export function createFieldState(): FieldState {
     sizeRandom: 1.0,
     lifespan: 0.7,
     gain: 0.5,
+    fieldGain: 1.0,
+    objectGain: 1.0,
   };
 }

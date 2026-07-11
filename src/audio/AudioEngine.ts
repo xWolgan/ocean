@@ -89,6 +89,8 @@ export class AudioEngine {
         asymmetry: state.asymmetry,
         tint: [state.tint.r, state.tint.g, state.tint.b],
         gain: state.gain,
+        fieldGain: state.fieldGain,
+        objectGain: state.objectGain,
         // worklet time = currentTime + timeOffset  ==  app tSec
         timeOffset: tSec - this.ctx.currentTime,
         listener: [_listener.x, _listener.y, _listener.z],

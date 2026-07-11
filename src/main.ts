@@ -10,6 +10,7 @@ import { Interaction } from './input/Interaction';
 import { createPanel } from './ui/Panel';
 import { ObjectManager } from './objects/ObjectManager';
 import { createObjectDef } from './objects/ObjectDef';
+import { CompositorAids } from './ui/CompositorAids';
 
 const bus = new ModulationBus();
 const objects = new ObjectManager();
@@ -58,7 +59,41 @@ void objects.add(createObjectDef({ kind: 'point', position: [0, 1.5, 0], sigma: 
 
 const audio = new AudioEngine();
 const interaction = new Interaction(camera, bus, objects, renderer.domElement);
-createPanel(bus, interaction, objects, settings, setParticleCount);
+const aids = new CompositorAids();
+scene.add(aids.group);
+createPanel(bus, interaction, objects, aids, controls, settings, setParticleCount);
+
+// --- WASD fly navigation (desktop compositor) ---
+const keys = new Set<string>();
+window.addEventListener('keydown', (e) => {
+  const t = e.target as HTMLElement | null;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+  keys.add(e.code);
+});
+window.addEventListener('keyup', (e) => keys.delete(e.code));
+window.addEventListener('blur', () => keys.clear());
+const _fwd = new THREE.Vector3();
+const _rightDir = new THREE.Vector3();
+const _move = new THREE.Vector3();
+
+function applyMovement(dt: number): void {
+  _move.set(0, 0, 0);
+  camera.getWorldDirection(_fwd);
+  _fwd.y = 0;
+  _fwd.normalize();
+  _rightDir.crossVectors(_fwd, camera.up).normalize();
+  if (keys.has('KeyW')) _move.add(_fwd);
+  if (keys.has('KeyS')) _move.sub(_fwd);
+  if (keys.has('KeyD')) _move.add(_rightDir);
+  if (keys.has('KeyA')) _move.sub(_rightDir);
+  if (keys.has('KeyE')) _move.y += 1;
+  if (keys.has('KeyQ')) _move.y -= 1;
+  if (_move.lengthSq() === 0) return;
+  const speed = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 6 : 2;
+  _move.normalize().multiplyScalar(speed * dt);
+  camera.position.add(_move);
+  controls.target.add(_move);
+}
 
 document.body.appendChild(XRButton.createButton(renderer));
 
@@ -110,6 +145,7 @@ renderer.setAnimationLoop((now: number) => {
       `backend   ${renderer.backend.constructor.name.replace('Backend', '')}`;
   }
 
+  applyMovement(dt);
   interaction.update(dt);
   bus.update();
   // the touch signal gates the selected object — playing an instrument
@@ -117,6 +153,7 @@ renderer.setAnimationLoop((now: number) => {
   objects.update(dt);
   field.update(bus.out, tSec, dt);
   field.updateObjects(objects, bus.out.scale);
+  aids.update(interaction, objects, tSec);
   audio.update(bus.out, camera, tSec, field.sonicStride, objects);
   controls.update();
 

@@ -131,6 +131,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       asymmetry: 0.0,
       tint: [0.75, 0.78, 0.85],
       gain: 0.5,
+      fieldGain: 1.0,
+      objectGain: 1.0,
       timeOffset: 0,
       listener: [0, 1.7, 4.4],
       right: [1, 0, 0],
@@ -362,7 +364,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           captured = v.capOn;
         }
 
-        const amp = captured ? v.capAmp : v.amp;
+        // environment and instruments have separate faders
+        const amp = captured ? v.capAmp * p.objectGain : v.amp * p.fieldGain;
         if (amp > 0.0002) {
           // captured: duty-gapped pulse on the object's clock (order);
           // free: jittered burst inside its slot (renewal — no clock)

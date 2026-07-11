@@ -1,6 +1,8 @@
 import GUI from 'lil-gui';
+import type { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { ModulationBus } from '../state/ModulationBus';
 import type { Interaction, AuthoringMode } from '../input/Interaction';
+import type { CompositorAids } from './CompositorAids';
 import { ObjectManager, SLOT_COUNT } from '../objects/ObjectManager';
 
 export const PARTICLE_COUNTS: Record<string, number> = {
@@ -18,6 +20,8 @@ export function createPanel(
   bus: ModulationBus,
   interaction: Interaction,
   objects: ObjectManager,
+  aids: CompositorAids,
+  controls: OrbitControls,
   settings: { particleCount: number },
   onParticleCountChange: (count: number) => void,
 ): GUI {
@@ -75,6 +79,7 @@ export function createPanel(
 
   // --- objects (the instruments) ---
   const objFolder = gui.addFolder('objects');
+  objFolder.add(aids, 'showMarkers').name('show object markers');
   let tuning: GUI | null = null;
 
   function rebuildTuning(): void {
@@ -111,6 +116,17 @@ export function createPanel(
     tuning.addColor(tint, 'color').name('tint');
     tuning.add(p, 'tintWeight', 0, 1, 0.01).name('  ↳ weight');
     tuning.add(p, 'sync', 0, 1, 0.01).name('sync (cloud ↔ tone)');
+    tuning
+      .add(
+        {
+          lookAt() {
+            const c = objects.slots[objects.selected]?.cloud;
+            if (c) controls.target.copy(c.center);
+          },
+        },
+        'lookAt',
+      )
+      .name('look at it (find lost object)');
     tuning
       .add(
         {
@@ -206,8 +222,9 @@ export function createPanel(
   perf.close();
 
   const audio = gui.addFolder('audio');
-  audio.add(base, 'gain', 0, 1, 0.01).name('gain').listen();
-  audio.close();
+  audio.add(base, 'gain', 0, 1, 0.01).name('master gain').listen();
+  audio.add(base, 'fieldGain', 0, 1, 0.01).name('environment gain').listen();
+  audio.add(base, 'objectGain', 0, 1, 0.01).name('objects gain').listen();
 
   const unbound = gui.addFolder('unbound');
   unbound.add(base, 'speed', 0, 1, 0.001).name('speed (visual drift)').listen();

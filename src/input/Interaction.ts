@@ -19,8 +19,11 @@ export class Interaction {
   planeHeight = 1.5;
   /** Pending image (data URLs) armed by the panel's file input. */
   pendingImage: { src: string; depthSrc?: string } | null = null;
+  /** Current pointer position on the placement plane (null = off-plane). */
+  cursorPos: THREE.Vector3 | null = null;
 
   private readonly touch: Source;
+  private readonly cursorScratch = new THREE.Vector3();
   private readonly raycaster = new THREE.Raycaster();
   private readonly ndc = new THREE.Vector2();
   private readonly hit = new THREE.Vector3();
@@ -79,6 +82,12 @@ export class Interaction {
 
   private onPointerMove(e: PointerEvent): void {
     this.lastPointerEvent = e;
+    if (this.mode !== 'play') {
+      const p = this.raycastPlane(e);
+      this.cursorPos = p ? this.cursorScratch.copy(p) : null;
+    } else {
+      this.cursorPos = null;
+    }
     if (this.stroke) {
       const p = this.raycastPlane(e);
       if (p) {

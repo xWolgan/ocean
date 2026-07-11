@@ -32,7 +32,9 @@ export type ParamId =
   | 'tintB'
   | 'colorRandom'
   | 'sizeRandom'
-  | 'gain';
+  | 'gain'
+  | 'fieldGain'
+  | 'objectGain';
 
 const RANGES: Record<ParamId, [number, number]> = {
   density: [0, 1],
@@ -47,6 +49,8 @@ const RANGES: Record<ParamId, [number, number]> = {
   colorRandom: [0, 1],
   sizeRandom: [0, 1],
   gain: [0, 1],
+  fieldGain: [0, 1],
+  objectGain: [0, 1],
 };
 
 /** A control signal. Anything may write `value` each frame. */
@@ -89,6 +93,8 @@ export class ModulationBus {
       colorRandom: this.out.colorRandom,
       sizeRandom: this.out.sizeRandom,
       gain: this.out.gain,
+      fieldGain: this.out.fieldGain,
+      objectGain: this.out.objectGain,
     };
   }
 
@@ -137,5 +143,7 @@ export class ModulationBus {
     o.colorRandom = resolved.colorRandom;
     o.sizeRandom = resolved.sizeRandom;
     o.gain = resolved.gain;
+    o.fieldGain = resolved.fieldGain;
+    o.objectGain = resolved.objectGain;
   }
 }
