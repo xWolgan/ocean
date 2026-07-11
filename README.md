@@ -74,9 +74,24 @@ therefore also the pitch axis: 100 ms = 10 Hz pulse, 1 ms = 1 kHz tone.
   TSL's hash that keeps both renderings on the same randomness.
 - `public/granular-processor.js` — the twin scheduler: 256 voices evaluate
   the same lifetimes/phases/positions/lotteries and synthesize each flash
-  as a grain. Position → pan + distance loudness, color band → filter
-  center (colorRandom scatters both and sets bandwidth), scale → register
-  (big = low), density → which generations exist.
+  as a grain whose content is a PURE SINE plus secondary tones from the
+  particle's color. The settled grain↔particle mapping:
+
+  | grain parameter | visual cue |
+  |---|---|
+  | amplitude | brightness |
+  | duration | lifespan |
+  | content pitch | size (big = low) |
+  | secondary tones: amount | saturation |
+  | secondary tones: recipe | hue (circular timbre wheel) |
+  | spatial position | itself (pan + distance) |
+  | rate | emergent: density ÷ lifespan |
+  | regularity → pitch-from-rate | order = attractor synchronization |
+  | noisiness | emergent: brevity (Gabor uncertainty) + scatter |
+
+  The universe is pure tones; noise is their disorder (Fourier: white
+  noise = all sines at random phase). `speed` is visual-only ("unbound"
+  folder, default 0) until it earns an audible twin.
 - `src/audio/AudioEngine.ts` — control-rate bridge (~60 Hz): sliders,
   listener pose, attractor state, and the clock offset that maps the audio
   clock onto the app clock. No audio data crosses it.

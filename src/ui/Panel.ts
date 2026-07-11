@@ -23,12 +23,11 @@ export function createPanel(
   // .listen() so sliders track state changed from elsewhere (later: composed automation)
   const field = gui.addFolder('field');
   field.add(state, 'density', 0, 1, 0.001).name('density').listen();
-  field.add(state, 'speed', 0, 1, 0.001).name('speed').listen();
-  field.add(state, 'scale', 0, 1, 0.001).name('scale').listen();
-  field.add(state, 'lifespan', 0, 1, 0.001).name('lifespan').listen();
+  field.add(state, 'scale', 0, 1, 0.001).name('scale (pitch: big = low)').listen();
+  field.add(state, 'lifespan', 0, 1, 0.001).name('lifespan (duration)').listen();
 
   const color = gui.addFolder('color');
-  color.addColor(state, 'tint').name('tint').listen();
+  color.addColor(state, 'tint').name('tint (hue→timbre, sat→richness)').listen();
   color.add(state, 'colorRandom', 0, 1, 0.001).name('randomness').listen();
 
   const attractor = gui.addFolder('attractor');
@@ -43,6 +42,10 @@ export function createPanel(
     .add(settings, 'particleCount', PARTICLE_COUNTS)
     .name('particles')
     .onChange((v: number) => onParticleCountChange(v));
+
+  // visual-only parameters with no audible twin yet
+  const unbound = gui.addFolder('unbound');
+  unbound.add(state, 'speed', 0, 1, 0.001).name('speed (visual drift)').listen();
 
   return gui;
 }

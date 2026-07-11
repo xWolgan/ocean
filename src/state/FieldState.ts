@@ -51,7 +51,8 @@ export const FIELD_HALF_EXTENTS = new Vector3(3, 1.5, 3);
 export function createFieldState(): FieldState {
   return {
     density: 0.55,
-    speed: 0.5,
+    // unbound: no audible twin yet — defaults to stillness
+    speed: 0.0,
     scale: 0.4,
     tint: new Color(0.75, 0.78, 0.85),
     colorRandom: 0.5,

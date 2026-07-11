@@ -66,8 +66,8 @@ export class AudioEngine {
         tau: lifespanToTau(state.lifespan),
         density: state.density,
         registerHz: 180 * Math.pow(20, 1 - state.scale),
-        scatter: 4.4 * state.colorRandom,
-        qBase: 0.7 + 18 * Math.pow(1 - state.colorRandom, 2),
+        colorRandom: state.colorRandom,
+        tint: [state.tint.r, state.tint.g, state.tint.b],
         gain: state.gain,
         // worklet time = currentTime + timeOffset  ==  app tSec
         timeOffset: tSec - this.ctx.currentTime,
