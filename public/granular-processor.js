@@ -262,11 +262,27 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         );
         const vt = this.voiceTargets;
         const k6 = (v.i / p.stride) * 6;
+        // capture color, mirroring the GPU: image target color overrides,
+        // else the object's LIVE tint; scattered by the object's color
+        // dispersion; blended over the voice's ambient color by tintWeight
+        const hasColor = vt[k6 + 3] >= 0 ? 1 : 0;
+        const baseR = hasColor ? vt[k6 + 3] : obj.tintR;
+        const baseG = hasColor ? vt[k6 + 4] : obj.tintG;
+        const baseB = hasColor ? vt[k6 + 5] : obj.tintB;
         const crEff = p.colorRandom + (obj.crV - p.colorRandom) * obj.crW;
         const cr2 = Math.max(0, Math.min(1, crEff));
-        const rr = vt[k6 + 3] * (1 - cr2) + v.rgbRand[0] * cr2;
-        const gg = vt[k6 + 4] * (1 - cr2) + v.rgbRand[1] * cr2;
-        const bb = vt[k6 + 5] * (1 - cr2) + v.rgbRand[2] * cr2;
+        const scatR = baseR * (1 - cr2) + v.rgbRand[0] * cr2;
+        const scatG = baseG * (1 - cr2) + v.rgbRand[1] * cr2;
+        const scatB = baseB * (1 - cr2) + v.rgbRand[2] * cr2;
+        // ambient per-voice color (same as the free path derives)
+        const acr = p.colorRandom;
+        const ambR = p.tint[0] * (1 - acr) + v.rgbRand[0] * acr;
+        const ambG = p.tint[1] * (1 - acr) + v.rgbRand[1] * acr;
+        const ambB = p.tint[2] * (1 - acr) + v.rgbRand[2] * acr;
+        const w = hasColor ? Math.max(obj.tintW, obj.level) : obj.tintW;
+        const rr = ambR * (1 - w) + scatR * w;
+        const gg = ambG * (1 - w) + scatG * w;
+        const bb = ambB * (1 - w) + scatB * w;
         const [h, s, val] = rgbToHsv(rr, gg, bb);
         const wheelPos = h * n;
         v.capTableA = Math.floor(wheelPos) % n;

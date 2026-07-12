@@ -25,6 +25,10 @@ export interface AudioObjectDescriptor {
   centerZ: number;
   reach: number; // boundRadius + influenceRadius
   gain: number;
+  tintR: number;
+  tintG: number;
+  tintB: number;
+  tintW: number; // tintWeight · level
   crV: number; // colorRandom value / weight
   crW: number;
   srV: number; // sizeRandom value / weight
@@ -131,6 +135,7 @@ export class ObjectManager {
       if (!inst || !inst.cloud || inst.level <= 0.001) {
         return { level: 0, claim: 0, tau: 0.02, sync: 1, registerHz: 800,
                  centerX: 0, centerY: 0, centerZ: 0, reach: 0, gain: 1,
+                 tintR: 1, tintG: 1, tintB: 1, tintW: 0,
                  crV: 0, crW: 0, srV: 0.5, srW: 0, smearV: 0.5, smearW: 0,
                  asymV: 0, asymW: 0 };
       }
@@ -148,6 +153,10 @@ export class ObjectManager {
         centerZ: inst.cloud.center.z,
         reach: inst.cloud.boundRadius + inst.def.influenceRadius,
         gain: p.gain,
+        tintR: p.tintR,
+        tintG: p.tintG,
+        tintB: p.tintB,
+        tintW: p.tintWeight * inst.level,
         crV: p.colorRandom.value,
         crW: p.colorRandom.weight * inst.level,
         srV: p.sizeRandom.value,
@@ -175,12 +184,11 @@ export class ObjectManager {
       out[o] = d[ti * 6];
       out[o + 1] = d[ti * 6 + 1];
       out[o + 2] = d[ti * 6 + 2];
-      const p = inst.def.patch;
-      const hasColor = d[ti * 6 + 3] >= 0;
-      // resolved capture color: target color for images, else patch tint
-      out[o + 3] = hasColor ? d[ti * 6 + 3] : p.tintR;
-      out[o + 4] = hasColor ? d[ti * 6 + 4] : p.tintG;
-      out[o + 5] = hasColor ? d[ti * 6 + 5] : p.tintB;
+      // RAW target color (-1 = no own color): the worklet resolves the
+      // patch tint from control-rate descriptors so tint edits stay LIVE
+      out[o + 3] = d[ti * 6 + 3];
+      out[o + 4] = d[ti * 6 + 4];
+      out[o + 5] = d[ti * 6 + 5];
     }
     return out;
   }
