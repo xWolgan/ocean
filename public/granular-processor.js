@@ -161,6 +161,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.hpYL = 0;
     this.hpYR = 0;
     this.hpR = 1 - (2 * Math.PI * 35) / sampleRate;
+    // limiter: envelope follower (instant attack, ~250ms release)
+    this.limEnv = 0;
+    this.limRelease = Math.exp(-1 / (0.25 * sampleRate));
 
     this.port.onmessage = (e) => {
       if (e.data.type === 'params') {
@@ -450,6 +453,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // infrasonic energy that has no business in the mix
     const R = this.hpR;
     const gain = p.gain * 2.4;
+    // limiter: ride the gain down instead of saturating — many loud
+    // voices should get quieter together, not dirtier
+    const LIM_THRESH = 0.8;
+    const limRel = this.limRelease;
     for (let s = 0; s < n; s++) {
       const xl = outL[s];
       const xr = outR[s];
@@ -457,8 +464,15 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       this.hpYR = xr - this.hpXR + R * this.hpYR;
       this.hpXL = xl;
       this.hpXR = xr;
-      outL[s] = Math.tanh(this.hpYL * gain);
-      outR[s] = Math.tanh(this.hpYR * gain);
+      const l = this.hpYL * gain;
+      const r = this.hpYR * gain;
+      const peak = Math.max(Math.abs(l), Math.abs(r));
+      this.limEnv = peak > this.limEnv ? peak : this.limEnv * limRel;
+      const gr = this.limEnv > LIM_THRESH ? LIM_THRESH / this.limEnv : 1;
+      // gentle tanh stays as a pure safety ceiling — the limiter should
+      // keep the signal in its linear region
+      outL[s] = Math.tanh(l * gr);
+      outR[s] = Math.tanh(r * gr);
     }
 
     if (++this.blockCounter >= REPORT_INTERVAL_BLOCKS) {
