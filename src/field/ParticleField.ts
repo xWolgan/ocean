@@ -326,7 +326,8 @@ export class ParticleField {
       const ambientSize = 0.006 + ambientScale * 0.045;
       const objSize = 0.006 + p.scale.value * 0.045;
       C[m].set(
-        lifespanToTau(p.lifespan.value),
+        // the octave stretches the whole timebase (must match the audio)
+        lifespanToTau(p.lifespan.value) / Math.pow(2, p.octave),
         ambientSize + (objSize - ambientSize) * p.scale.weight,
         p.scale.weight * inst.level,
         p.tintWeight * inst.level,

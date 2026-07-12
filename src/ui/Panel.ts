@@ -103,6 +103,7 @@ export function createPanel(
     tuning.add(p.lifespan, 'weight', 0, 1, 0.01).name('  ↳ weight');
     tuning.add(p.scale, 'value', 0, 1, 0.001).name('scale (register)');
     tuning.add(p.scale, 'weight', 0, 1, 0.01).name('  ↳ weight');
+    tuning.add(p, 'octave', -3, 2, 1).name('octave (lower = slower)');
     // a persistent proxy object: lil-gui mutates it in place, onChange
     // copies into the patch (a getter returning copies never writes back)
     const tint = { color: { r: p.tintR, g: p.tintG, b: p.tintB } };

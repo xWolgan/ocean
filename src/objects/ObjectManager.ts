@@ -140,11 +140,13 @@ export class ObjectManager {
                  asymV: 0, asymW: 0 };
       }
       const p = inst.def.patch;
-      const objRegister = 180 * Math.pow(20, 1 - p.scale.value);
+      const octUp = Math.pow(2, p.octave);
+      const objRegister = 180 * Math.pow(20, 1 - p.scale.value) * octUp;
       return {
         level: inst.level,
         claim: inst.def.claim,
-        tau: lifespanToTau(p.lifespan.value),
+        // the octave stretches the whole timebase: lower = slower
+        tau: lifespanToTau(p.lifespan.value) / octUp,
         sync: p.sync,
         registerHz:
           ambientRegisterHz + (objRegister - ambientRegisterHz) * p.scale.weight,

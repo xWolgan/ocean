@@ -52,6 +52,9 @@ export interface ObjectPatch {
   lifespan: Weighted;
   /** Register (pitch: big = low) of captured matter. */
   scale: Weighted;
+  /** Octave shift (-3..+2) of the whole timebase: carrier ×2^oct, clock
+   *  and grain length ×2^-oct — big things are lower AND slower. */
+  octave: number;
   /** Tint of captured matter (images use per-target colors instead). */
   tintR: number;
   tintG: number;
@@ -93,6 +96,7 @@ export function defaultPatch(): ObjectPatch {
   return {
     lifespan: { value: 0.5, weight: 1 },
     scale: { value: 0.5, weight: 0.5 },
+    octave: 0,
     tintR: 0.85,
     tintG: 0.9,
     tintB: 1.0,

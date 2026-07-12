@@ -61,6 +61,18 @@ function buildTable(recipe) {
   return t;
 }
 
+/** Psychoacoustic bass compensation: the ear needs far more energy at low
+ *  frequencies for equal loudness (Fletcher–Munson, roughly). */
+function bassBoost(freq) {
+  return freq < 220 ? Math.min(3, Math.sqrt(220 / freq)) : 1;
+}
+
+/** Bass belongs in the middle: narrow the pan of low voices toward mono. */
+function bassMono(pan, freq, center = 0.7071) {
+  const w = Math.min(1, freq / 150);
+  return center + (pan - center) * w;
+}
+
 function rgbToHsv(r, g, b) {
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
@@ -160,7 +172,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.hpXR = 0;
     this.hpYL = 0;
     this.hpYR = 0;
-    this.hpR = 1 - (2 * Math.PI * 35) / sampleRate;
+    // 25 Hz: give sub-bass fundamentals headroom, still block DC/rumble
+    this.hpR = 1 - (2 * Math.PI * 25) / sampleRate;
     // limiter: envelope follower (instant attack, ~250ms release)
     this.limEnv = 0;
     this.limRelease = Math.exp(-1 / (0.25 * sampleRate));
@@ -322,9 +335,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     if (alive) {
       this.spatialize(bx, by, bz, spat);
       const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
-      v.amp = 0.1 * v.bright * mag;
-      v.panL = spat[0] / mag;
-      v.panR = spat[1] / mag;
+      v.amp = 0.1 * v.bright * mag * bassBoost(v.freq);
+      v.panL = bassMono(spat[0] / mag, v.freq);
+      v.panR = bassMono(spat[1] / mag, v.freq);
     } else {
       v.amp = 0;
     }
@@ -342,9 +355,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       const vt = this.voiceTargets;
       this.spatialize(vt[k6], vt[k6 + 1], vt[k6 + 2], spat);
       const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
-      v.capAmp = 0.13 * v.capBright * mag * obj.gain;
-      v.capPanL = spat[0] / mag;
-      v.capPanR = spat[1] / mag;
+      v.capAmp = 0.13 * v.capBright * mag * obj.gain * bassBoost(v.capFreq);
+      v.capPanL = bassMono(spat[0] / mag, v.capFreq);
+      v.capPanR = bassMono(spat[1] / mag, v.capFreq);
     } else {
       v.capAmp = 0;
     }
