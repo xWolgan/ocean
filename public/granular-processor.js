@@ -25,6 +25,7 @@ const VOICES = 256;
 const REPORT_INTERVAL_BLOCKS = 40;
 const TABLE_SIZE = 2048;
 const TABLE_MASK = TABLE_SIZE - 1;
+const ENV_LUT_SIZE = 512;
 
 function pcg(n) {
   const state = (Math.imul(n, 747796405) + 2891336453) >>> 0;
@@ -96,7 +97,8 @@ class Voice {
     this.capAmp = 0;
     this.capPanL = 0.7;
     this.capPanR = 0.7;
-    this.inReach = false;
+    this.capPhase = 0; // separate oscillator phase per timeline — the free
+    this.inReach = false; // clock must never touch a captured grain's phase
 
     // derived on params change
     this.freq = 440;
@@ -194,9 +196,33 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     out[1] = distGain * Math.sin(theta);
   }
 
+  /** Bake an envelope window into a lookup table — the hot loop must not
+   *  call Math.pow (that was the stutter under heavy capture). */
+  static bakeEnv(smear, asymmetry) {
+    const k = 0.25 + smear * smear * 2.75;
+    const c = Math.pow(2, asymmetry * 1.5);
+    const lut = new Float32Array(ENV_LUT_SIZE + 1);
+    for (let j = 0; j <= ENV_LUT_SIZE; j++) {
+      const aa = j / ENV_LUT_SIZE;
+      const uw = Math.pow(aa, c);
+      lut[j] = Math.pow(Math.max(0, 4 * uw * (1 - uw)), k);
+    }
+    return lut;
+  }
+
   refreshDerived() {
     const p = this.p;
     const n = this.wheel.length;
+
+    this.envLUT = OceanTwinProcessor.bakeEnv(p.smear, p.asymmetry);
+    this.objEnvLUT = [];
+    for (let m = 0; m < p.objects.length; m++) {
+      const o = p.objects[m];
+      this.objEnvLUT[m] = OceanTwinProcessor.bakeEnv(
+        p.smear + (o.smearV - p.smear) * o.smearW,
+        p.asymmetry + (o.asymV - p.asymmetry) * o.asymW,
+      );
+    }
     for (let k = 0; k < VOICES; k++) {
       const v = this.voices[k];
       // the particle's actual color: mix(tint, per-particle random, colorRandom)
@@ -289,7 +315,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  spatialized at the voice's actual target in the constellation. */
   refreshCapturedGeneration(v, g, obj, slotSalt, spat) {
     v.capGen = g;
-    v.phase = 0;
+    v.capPhase = 0;
     v.capOn =
       v.inReach && h2(v.i, g, slotSalt) < obj.claim * obj.level ? 1 : 0;
     if (v.capOn && this.voiceTargets) {
@@ -329,18 +355,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const invTau = 1 / p.tau;
     const t0 = currentTime + this.smoothOffset;
     const dt = 1 / sampleRate;
-    // the ONE envelope, same math as the GPU: smear -> steepness k,
-    // asymmetry -> age-warp c (peak early = appearing, late = vanishing);
-    // objects may impose their own shape on captured matter
-    const envK = 0.25 + p.smear * p.smear * 2.75;
-    const envC = Math.pow(2, p.asymmetry * 1.5);
-    const objEnv = [];
-    for (let m = 0; m < p.objects.length; m++) {
-      const o = p.objects[m];
-      const sm = p.smear + (o.smearV - p.smear) * o.smearW;
-      const as = p.asymmetry + (o.asymV - p.asymmetry) * o.asymW;
-      objEnv[m] = { k: 0.25 + sm * sm * 2.75, c: Math.pow(2, as * 1.5) };
-    }
+    const envLUT = this.envLUT;
+    const objEnvLUT = this.objEnvLUT;
     const spat = [0, 0];
     const sine = this.sine;
     let active = 0;
@@ -368,6 +384,17 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       }
       if ((v.capOn ? v.capAmp : v.amp) > 0.0002) active++;
 
+      // fast path: a silent voice with no generation boundary inside this
+      // block contributes nothing — skip its sample loop entirely
+      if (v.amp * p.fieldGain <= 0.0002 && (!objOn || v.capAmp * p.objectGain <= 0.0002)) {
+        const tEnd = t0 + n * dt;
+        const nextF = (v.gen + 1 - v.phi) / invLFree;
+        const nextO = objOn ? (v.capGen + 1 - phiObj) / invTauObj : Infinity;
+        if (nextF > tEnd && nextO > tEnd) continue;
+      }
+
+      const capLUT = objOn ? objEnvLUT[v.objSlot] || envLUT : envLUT;
+
       for (let s = 0; s < n; s++) {
         const xF = t * invLFree + v.phi;
         const gFn = Math.floor(xF);
@@ -390,28 +417,30 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           const aa = captured
             ? (xO - v.capGen) / 0.6
             : (xF - gFn - v.offN) / v.durN;
-          let env = 0;
           if (aa > 0 && aa < 1) {
-            const eK = captured ? objEnv[v.objSlot].k : envK;
-            const eC = captured ? objEnv[v.objSlot].c : envC;
-            const uw = Math.pow(aa, eC);
-            env = Math.pow(4 * uw * (1 - uw), eK);
+            // baked envelope — no pow in the hot loop
+            const env = (captured ? capLUT : envLUT)[(aa * ENV_LUT_SIZE) | 0];
+            if (env > 0.0001) {
+              const idx = (captured ? v.capPhase : v.phase) & TABLE_MASK;
+              const pure = sine[idx];
+              const tA = this.wheel[captured ? v.capTableA : v.tableA];
+              const tB = this.wheel[captured ? v.capTableB : v.tableB];
+              const tf = captured ? v.capTableFrac : v.tableFrac;
+              const sat = captured ? v.capSat : v.sat;
+              const rich = tA[idx] * (1 - tf) + tB[idx] * tf;
+              const osc = pure * (1 - sat) + rich * sat;
+              const smp = osc * env * amp;
+              outL[s] += smp * (captured ? v.capPanL : v.panL);
+              outR[s] += smp * (captured ? v.capPanR : v.panR);
+            }
           }
-          if (env > 0) {
-            const idx = v.phase & TABLE_MASK;
-            const pure = sine[idx];
-            const tA = this.wheel[captured ? v.capTableA : v.tableA];
-            const tB = this.wheel[captured ? v.capTableB : v.tableB];
-            const tf = captured ? v.capTableFrac : v.tableFrac;
-            const sat = captured ? v.capSat : v.sat;
-            const rich = tA[idx] * (1 - tf) + tB[idx] * tf;
-            const osc = pure * (1 - sat) + rich * sat;
-            const smp = osc * env * amp;
-            outL[s] += smp * (captured ? v.capPanL : v.panL);
-            outR[s] += smp * (captured ? v.capPanR : v.panR);
+          // each timeline owns its oscillator phase — the free clock must
+          // never chop a captured grain (that was the "random pitches")
+          if (captured) {
+            v.capPhase = (v.capPhase + (v.capFreq / sampleRate) * TABLE_SIZE) % TABLE_SIZE;
+          } else {
+            v.phase = (v.phase + (v.freq / sampleRate) * TABLE_SIZE) % TABLE_SIZE;
           }
-          const freq = captured ? v.capFreq : v.freq;
-          v.phase = (v.phase + (freq / sampleRate) * TABLE_SIZE) % TABLE_SIZE;
         }
         t += dt;
       }
