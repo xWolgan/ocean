@@ -26,7 +26,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      # npm install, not ci: lockfiles written on Windows omit Linux-only
+      # optional deps (npm/cli#4828), which makes strict ci fail here
+      - run: npm install
       - run: npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
