@@ -29,6 +29,7 @@ export interface AudioObjectDescriptor {
   tintG: number;
   tintB: number;
   tintW: number; // tintWeight · level
+  imgW: number; // imageColor weight
   crV: number; // colorRandom value / weight
   crW: number;
   srV: number; // sizeRandom value / weight
@@ -135,7 +136,7 @@ export class ObjectManager {
       if (!inst || !inst.cloud || inst.level <= 0.001) {
         return { level: 0, claim: 0, tau: 0.02, sync: 1, registerHz: 800,
                  centerX: 0, centerY: 0, centerZ: 0, reach: 0, gain: 1,
-                 tintR: 1, tintG: 1, tintB: 1, tintW: 0,
+                 tintR: 1, tintG: 1, tintB: 1, tintW: 0, imgW: 1,
                  crV: 0, crW: 0, srV: 0.5, srW: 0, smearV: 0.5, smearW: 0,
                  asymV: 0, asymW: 0 };
       }
@@ -159,6 +160,7 @@ export class ObjectManager {
         tintG: p.tintG,
         tintB: p.tintB,
         tintW: p.tintWeight * inst.level,
+        imgW: p.imageColor,
         crV: p.colorRandom.value,
         crW: p.colorRandom.weight * inst.level,
         srV: p.sizeRandom.value,

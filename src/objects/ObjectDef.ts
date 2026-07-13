@@ -72,6 +72,9 @@ export interface ObjectPatch {
   sync: number;
   /** The object's own volume (audio). */
   gain: number;
+  /** 0..1 — for objects whose targets carry colors (images): how much of
+   *  each particle's color comes from the image vs the tint settings. */
+  imageColor: number;
 }
 
 export interface ObjectDef {
@@ -109,6 +112,7 @@ export function defaultPatch(): ObjectPatch {
     asymmetry: { value: 0.0, weight: 0 },
     sync: 1.0,
     gain: 1.0,
+    imageColor: 1.0,
   };
 }
 

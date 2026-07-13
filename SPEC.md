@@ -111,8 +111,11 @@ An object = **constellation** (2048 targets, optional per-target colors)
   - curve (Catmull-Rom through drawn control points; closed可 + optional
     surface fill toward centroid; thickness)
   - primitive: sphere / box / cylinder × surface / volume
-  - image (data-URL, optional depth map; pixels above luma threshold →
-    targets with the PIXEL'S COLOR = its spectrum; the image is a chord)
+  - image (data-URL, optional depth map; targets spread UNIFORMLY over
+    the image — structure is carried by color, never by particle density;
+    each target carries its pixel's color = its spectrum; the patch's
+    `imageColor` (0–1) blends particle colors between the settings' tint
+    (0) and the image's own pixels (1))
 - Playing: in `play` mode, holding left mouse gates the SELECTED object
   through the touch envelope. `active` latches it on.
 
