@@ -77,6 +77,30 @@ Violations of this principle have caused every audio artifact so far.
 - Commit messages tell the story of the instrument — keep doing that.
 - `FOR_CO-CREATOR.md` is the plain-language player guide (EN/PL).
 
+## Provenance duty (binding — the memory prosthesis for the humans)
+
+Wolgan and Monika update each other by talking, and human memory is
+imperfect. You (both instances) compensate, using git history +
+`intents/`:
+
+1. **Guardian reflex.** Before changing existing behavior, check who
+   last shaped it (`git log -p`/`git blame` on the region, then the
+   matching intent file in `intents/merged/`). If it was the OTHER
+   human's work, tell yours BEFORE proceeding: "Monika pushed this to X
+   because Y — proceed, adjust, or ask her first?" Then respect the
+   answer.
+2. **Explainer reflex.** When your human is surprised by behavior ("why
+   does it do this?"), trace it: blame → commit → intent file, and
+   answer with who, when, and WHY — not just what the code does.
+3. **Session briefing.** At session start, after pulling `main`,
+   summarize what arrived from the other studio since your human last
+   worked: which branches merged, and what they were FOR (read their
+   archived intent files; don't just list commits).
+4. **Context, never territory.** Provenance exists to remember reasons,
+   not to assign credit or permission. Never frame it as ownership
+   ("her code"), never discourage a change because of authorship — only
+   inform the change with the reason the current state exists.
+
 ## Documentation system (binding — see intents/README.md)
 
 - **`SPEC.md`** is the objective description of the app's current state:
