@@ -30,6 +30,10 @@ export interface AudioObjectDescriptor {
   tintB: number;
   tintW: number; // tintWeight · level
   imgW: number; // imageColor weight
+  gridW: number; // > 0 marks a gridded (canvas) cloud
+  gridH: number;
+  cellX: number;
+  cellY: number;
   crV: number; // colorRandom value / weight
   crW: number;
   srV: number; // sizeRandom value / weight
@@ -137,6 +141,7 @@ export class ObjectManager {
         return { level: 0, claim: 0, tau: 0.02, sync: 1, registerHz: 800,
                  centerX: 0, centerY: 0, centerZ: 0, reach: 0, gain: 1,
                  tintR: 1, tintG: 1, tintB: 1, tintW: 0, imgW: 1,
+                 gridW: 0, gridH: 0, cellX: 0, cellY: 0,
                  crV: 0, crW: 0, srV: 0.5, srW: 0, smearV: 0.5, smearW: 0,
                  asymV: 0, asymW: 0 };
       }
@@ -161,6 +166,10 @@ export class ObjectManager {
         tintB: p.tintB,
         tintW: p.tintWeight * inst.level,
         imgW: p.imageColor,
+        gridW: inst.cloud.grid ? inst.cloud.grid[0] : 0,
+        gridH: inst.cloud.grid ? inst.cloud.grid[1] : 0,
+        cellX: inst.cloud.cell[0],
+        cellY: inst.cloud.cell[1],
         crV: p.colorRandom.value,
         crW: p.colorRandom.weight * inst.level,
         srV: p.sizeRandom.value,

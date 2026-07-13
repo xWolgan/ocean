@@ -313,10 +313,24 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       return;
     }
     v.capOn = 1;
-    // fresh random constellation point this cycle — same hash as the GPU
-    const ti = Math.floor(h2(v.i, gPick, 517 + pick * 29) * (cloud.length / 6));
-    const px = cloud[ti * 6];
-    const py = cloud[ti * 6 + 1];
+    // fresh random landing this cycle — same hashes as the GPU; gridded
+    // clouds (images) sample a continuous (u,v) on the canvas
+    const uRnd = h2(v.i, gPick, 517 + pick * 29);
+    let ti;
+    let ox = 0;
+    let oy = 0;
+    if (o.gridW > 0) {
+      const vRnd = h2(v.i, gPick, 549 + pick * 37);
+      const col = Math.min(o.gridW - 1, Math.floor(uRnd * o.gridW));
+      const row = Math.min(o.gridH - 1, Math.floor(vRnd * o.gridH));
+      ti = row * o.gridW + col;
+      ox = (uRnd * o.gridW - col - 0.5) * o.cellX;
+      oy = -(vRnd * o.gridH - row - 0.5) * o.cellY;
+    } else {
+      ti = Math.floor(uRnd * (cloud.length / 6));
+    }
+    const px = cloud[ti * 6] + ox;
+    const py = cloud[ti * 6 + 1] + oy;
     const pz = cloud[ti * 6 + 2];
     const rawR = cloud[ti * 6 + 3];
     this.spatialize(px, py, pz, spat);
