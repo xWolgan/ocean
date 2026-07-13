@@ -92,8 +92,11 @@ An object = **constellation** (8192 targets, optional per-target colors)
   claim the surroundings visibly EMPTY into the object. Each rebirth
   lands at a FRESH random constellation point (per-generation target +
   cell jitter): particles paint the object rather than owning seats on
-  it. Images carry an intrinsic pixel-cell so particles tile them into
-  continuous paint; more particles = denser image.
+  it. Images are GRIDDED CANVASES: capture samples a continuous
+  (u,v) on the rectangle (grid cell = color, fraction = exact position) —
+  the point set does not exist; every rebirth lands anywhere on the
+  surface (verified: frame-to-frame landing masks statistically
+  independent). Geometry objects use scattered constellations.
 - Each object has its OWN clock: tau_obj = lifespanToTau(patch.lifespan)
   / 2^octave. Objects therefore form chords with each other.
 - sync (0–1): blends private phases toward unison — textured cloud ↔

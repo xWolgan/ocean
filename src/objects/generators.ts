@@ -11,9 +11,18 @@ export interface TargetCloud {
   boundRadius: number;
   /** Cell size around each target (meters, per axis): captured particles
    *  scatter within it so they FILL the object instead of stacking on
-   *  discrete targets. Images set it to their pixel-cell; others 0. */
+   *  discrete targets. Images set it to their grid-cell; others 0. */
   cell: [number, number, number];
+  /** Non-null for GRIDDED clouds (images): targets are stored in scanline
+   *  order [gridW × gridH]; capture samples a CONTINUOUS (u,v) on the
+   *  rectangle — cell for color, fraction for exact position. The object
+   *  is a canvas, not a point set. */
+  grid: [number, number] | null;
 }
+
+/** Image grid dimensions (gridW × gridH === TARGETS_PER_OBJECT). */
+export const IMAGE_GRID_W = 128;
+export const IMAGE_GRID_H = 64;
 
 /** Deterministic PRNG so a saved scene regenerates identical clouds. */
 function mulberry32(seed: number) {
@@ -33,7 +42,11 @@ function seedFromId(id: string): number {
   return h >>> 0;
 }
 
-function finalize(data: Float32Array, cell: [number, number, number] = [0, 0, 0]): TargetCloud {
+function finalize(
+  data: Float32Array,
+  cell: [number, number, number] = [0, 0, 0],
+  grid: [number, number] | null = null,
+): TargetCloud {
   const K = TARGETS_PER_OBJECT;
   const c = new THREE.Vector3();
   for (let k = 0; k < K; k++) c.add(new THREE.Vector3(data[k * 6], data[k * 6 + 1], data[k * 6 + 2]));
@@ -45,7 +58,7 @@ function finalize(data: Float32Array, cell: [number, number, number] = [0, 0, 0]
     const dz = data[k * 6 + 2] - c.z;
     r2 = Math.max(r2, dx * dx + dy * dy + dz * dz);
   }
-  return { data, center: c, boundRadius: Math.sqrt(r2), cell };
+  return { data, center: c, boundRadius: Math.sqrt(r2), cell, grid };
 }
 
 const NO_COLOR = -1; // sentinel: use the object's patch tint, not target color
@@ -148,48 +161,49 @@ export async function buildTargets(gen: GeneratorDef, id: string): Promise<Targe
       setTarget(data, k, cx + x * sx * 0.5, cy + y * sy * 0.5, cz + z * sz * 0.5);
     }
   } else if (gen.kind === 'image') {
-    const img = await loadImageData(gen.src, 160);
-    const depth = gen.depthSrc ? await loadImageData(gen.depthSrc, 160) : null;
+    const img = await loadImageData(gen.src, 256);
+    const depth = gen.depthSrc ? await loadImageData(gen.depthSrc, 256) : null;
     const [cx, cy, cz] = gen.position;
     const aspect = img.height / img.width;
     const w = gen.width;
     const h = w * aspect;
-    // UNIFORM spread: every pixel of the image is an equally likely home
-    // for a particle — only true transparency is skipped. Dark pixels
-    // become dim particles, not absent ones; the image's structure is
-    // carried by color, never by particle density (that made contours).
-    const candidates: number[] = [];
-    for (let p = 0; p < img.width * img.height; p++) {
-      const a = img.data[p * 4 + 3] / 255;
-      if (a >= Math.max(0.05, gen.lumaThreshold)) candidates.push(p);
-    }
-    const n = Math.max(1, candidates.length);
-    for (let k = 0; k < K; k++) {
-      const p = candidates.length ? candidates[Math.floor(rand() * n)] : 0;
-      const px = p % img.width;
-      const py = Math.floor(p / img.width);
-      const u = (px + rand()) / img.width;
-      const vv = (py + rand()) / img.height;
-      let dz = 0;
-      if (depth) {
-        const dpx = Math.min(depth.width - 1, Math.floor(u * depth.width));
-        const dpy = Math.min(depth.height - 1, Math.floor(vv * depth.height));
-        const dp = (dpy * depth.width + dpx) * 4;
-        dz = (depth.data[dp] / 255 - 0.5) * gen.depthRange;
+    // GRIDDED cloud: the image downsampled to IMAGE_GRID_W×H, targets in
+    // scanline order. Capture samples a CONTINUOUS (u,v) on the rectangle
+    // — this cell's color, exact in-cell position — so particles PAINT
+    // the whole surface; the point set does not exist. Transparent /
+    // sub-threshold cells become black (invisible, near-silent) matter.
+    for (let row = 0; row < IMAGE_GRID_H; row++) {
+      for (let col = 0; col < IMAGE_GRID_W; col++) {
+        const k = row * IMAGE_GRID_W + col;
+        const u = (col + 0.5) / IMAGE_GRID_W;
+        const vv = (row + 0.5) / IMAGE_GRID_H;
+        const px = Math.min(img.width - 1, Math.floor(u * img.width));
+        const py = Math.min(img.height - 1, Math.floor(vv * img.height));
+        const p = (py * img.width + px) * 4;
+        const alpha = img.data[p + 3] / 255;
+        const on = alpha >= Math.max(0.05, gen.lumaThreshold) ? 1 : 0;
+        let dz = 0;
+        if (depth) {
+          const dpx = Math.min(depth.width - 1, Math.floor(u * depth.width));
+          const dpy = Math.min(depth.height - 1, Math.floor(vv * depth.height));
+          dz = (depth.data[(dpy * depth.width + dpx) * 4] / 255 - 0.5) * gen.depthRange;
+        }
+        setTarget(
+          data, k,
+          cx + (u - 0.5) * w,
+          cy + (0.5 - vv) * h, // image y-down -> world y-up
+          cz + dz,
+          (img.data[p] / 255) * on,
+          (img.data[p + 1] / 255) * on,
+          (img.data[p + 2] / 255) * on,
+        );
       }
-      setTarget(
-        data, k,
-        cx + (u - 0.5) * w,
-        cy + (0.5 - vv) * h, // image y-down -> world y-up
-        cz + dz,
-        img.data[p * 4] / 255,
-        img.data[p * 4 + 1] / 255,
-        img.data[p * 4 + 2] / 255,
-      );
     }
-    // captured particles fill each target's pixel-cell: the image becomes
-    // continuous paint — more particles = denser, never just brighter dots
-    return finalize(data, [w / img.width, h / img.height, 0]);
+    return finalize(
+      data,
+      [w / IMAGE_GRID_W, h / IMAGE_GRID_H, 0],
+      [IMAGE_GRID_W, IMAGE_GRID_H],
+    );
   }
   return finalize(data);
 }

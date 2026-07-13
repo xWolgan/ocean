@@ -109,6 +109,11 @@ export class ParticleField {
   private readonly uObjG = uniformArray(
     Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(1, 0.05, 0.05, 0.05)),
   );
+  // H: (gridW, gridH, cellX, cellY) — gridW > 0 marks a GRIDDED cloud
+  // (image canvas): capture samples a continuous (u,v) on the rectangle
+  private readonly uObjH = uniformArray(
+    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(0, 0, 0, 0)),
+  );
 
   constructor(count: number, targetTexture: THREE.DataTexture) {
     this.count = count;
@@ -191,6 +196,7 @@ export class ParticleField {
       const E = vec4(this.uObjE.element(m) as any);
       const F = vec4(this.uObjF.element(m) as any);
       const G = vec4(this.uObjG.element(m) as any);
+      const H = vec4(this.uObjH.element(m) as any);
       /* eslint-enable @typescript-eslint/no-explicit-any */
       const tau = C.x.max(0.0005);
       // the object's clock: sync blends private phase toward unison
@@ -201,14 +207,32 @@ export class ParticleField {
       const inReach = step(length(freePos.sub(B.xyz)), B.w);
       const elig = step(roll, A.x).mul(inReach).mul(float(1).sub(taken));
 
-      // fresh random constellation point EVERY cycle (per-generation)
-      const tIdx = floor(h2(gO, 517 + m * 29).mul(TARGETS_PER_OBJECT)).toInt();
+      // fresh random landing EVERY cycle (per-generation). Two cloud
+      // kinds: SCATTERED (geometry: random target + jitter) and GRIDDED
+      // (images: continuous (u,v) on the canvas — cell for color,
+      // fraction for exact position; the point set does not exist).
+      const uRnd = h2(gO, 517 + m * 29);
+      const vRnd = h2(gO, 549 + m * 37);
+      const isGrid = step(1, H.x);
+      const colF = floor(uRnd.mul(H.x.max(1)));
+      const rowF = floor(vRnd.mul(H.y.max(1)));
+      const tIdxScat = floor(uRnd.mul(TARGETS_PER_OBJECT));
+      const tIdxGrid = rowF.mul(H.x.max(1)).add(colF);
+      const tIdx = mix(tIdxScat, tIdxGrid, isGrid).toInt();
       const posTexel = textureLoad(targetTexture, ivec2(tIdx, m * 2));
       const colTexel = textureLoad(targetTexture, ivec2(tIdx, m * 2 + 1));
-      const jit = vec3(h2(gO, 761 + m * 31), h2(gO, 862 + m * 31), h2(gO, 963 + m * 31))
+      const jitScat = vec3(h2(gO, 761 + m * 31), h2(gO, 862 + m * 31), h2(gO, 963 + m * 31))
         .sub(0.5)
         .mul(2)
         .mul(G.yzw);
+      // in-cell offset: world x follows u, world y runs against v (image
+      // y-down), matching how the grid targets were placed at cell centers
+      const jitGrid = vec3(
+        uRnd.mul(H.x.max(1)).sub(colF).sub(0.5).mul(H.z),
+        vRnd.mul(H.y.max(1)).sub(rowF).sub(0.5).negate().mul(H.w),
+        0,
+      );
+      const jit = mix(jitScat, jitGrid, isGrid);
 
       taken = taken.add(elig);
       capXO = mix(capXO, xO, elig);
@@ -346,6 +370,7 @@ export class ParticleField {
     const E = this.uObjE.array as THREE.Vector4[];
     const F = this.uObjF.array as THREE.Vector4[];
     const G = this.uObjG.array as THREE.Vector4[];
+    const H = this.uObjH.array as THREE.Vector4[];
     for (let m = 0; m < SLOT_COUNT; m++) {
       const inst = manager.slots[m];
       if (!inst || !inst.cloud || inst.level <= 0.001) {
@@ -389,6 +414,8 @@ export class ParticleField {
         Math.max(inst.def.spatialSmear, cell[1] / 2),
         Math.max(inst.def.spatialSmear, cell[2] / 2),
       );
+      const grid = inst.cloud.grid;
+      H[m].set(grid ? grid[0] : 0, grid ? grid[1] : 0, cell[0], cell[1]);
     }
   }
 
