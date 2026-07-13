@@ -82,6 +82,11 @@ export class AudioEngine {
         { type: 'clouds', data: clouds },
         clouds.filter((c): c is Float32Array => c !== null).map((c) => c.buffer),
       );
+      const images = objects.audioImages();
+      this.node.port.postMessage(
+        { type: 'audioImages', data: images },
+        images.filter((i): i is { size: number; data: Uint8Array } => i !== null).map((i) => i.data.buffer),
+      );
     }
 
     this.node.port.postMessage({

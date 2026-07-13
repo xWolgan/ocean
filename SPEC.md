@@ -92,11 +92,18 @@ An object = **constellation** (8192 targets, optional per-target colors)
   claim the surroundings visibly EMPTY into the object. Each rebirth
   lands at a FRESH random constellation point (per-generation target +
   cell jitter): particles paint the object rather than owning seats on
-  it. Images are GRIDDED CANVASES: capture samples a continuous
-  (u,v) on the rectangle (grid cell = color, fraction = exact position) —
-  the point set does not exist; every rebirth lands anywhere on the
-  surface (verified: frame-to-frame landing masks statistically
-  independent). Geometry objects use scattered constellations.
+  it. Images are PROPERTY FIELDS: a full-resolution texture
+  (1024 stretched; >=1024 on the long edge) on an analytic rectangle.
+  Capture lands at a continuous (u,v); the SOURCE PIXEL under the landing
+  dresses the particle — one pixel, one set of particle properties; the
+  only quantization is the photograph's own. Surface thickness is
+  paper-thin (default 2mm, tunable, zero-thickness tick for an exact
+  plane). Attraction MOVES matter; geometry DRESSES it: even at
+  attraction 0, ambient matter inside the slab takes the image's pixel
+  properties (verified). Audio twin uses a compact 256x256 copy
+  (deliberate sub-perceptual divergence). Depth maps temporarily inert
+  (return with the analytic-geometry pass). Geometry objects still use
+  scattered constellations — analytic unification agreed as next step.
 - Each object has its OWN clock: tau_obj = lifespanToTau(patch.lifespan)
   / 2^octave. Objects therefore form chords with each other.
 - sync (0–1): blends private phases toward unison — textured cloud ↔
