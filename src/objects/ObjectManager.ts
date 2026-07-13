@@ -1,7 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { normalizePatch, type ObjectDef } from './ObjectDef';
 import { buildTargets, TARGETS_PER_OBJECT, type TargetCloud } from './generators';
-import { lifespanToTau, pcgHash, SONIC_COUNT } from '../field/ParticleField';
+import { lifespanToTau } from '../field/ParticleField';
 
 /** Concurrent object slots. Particle poolRoll -> slot = floor(roll * 8). */
 export const SLOT_COUNT = 8;
@@ -173,28 +173,12 @@ export class ObjectManager {
     });
   }
 
-  /** Per-sonic-voice target position+color, resolved for the voice's slot.
-   *  [SONIC_COUNT × 6]: x,y,z,r,g,b (rgb already patch-resolved). */
-  voiceTargets(sonicStride: number): Float32Array {
-    const out = new Float32Array(SONIC_COUNT * 6);
-    for (let k = 0; k < SONIC_COUNT; k++) {
-      const i = k * sonicStride;
-      const m = Math.min(SLOT_COUNT - 1, Math.floor(pcgHash(i + 747) * SLOT_COUNT));
-      const inst = this.slots[m];
-      if (!inst || !inst.cloud) continue;
-      const ti = Math.floor(pcgHash(i + 517) * TARGETS_PER_OBJECT);
-      const d = inst.cloud.data;
-      const o = k * 6;
-      out[o] = d[ti * 6];
-      out[o + 1] = d[ti * 6 + 1];
-      out[o + 2] = d[ti * 6 + 2];
-      // RAW target color (-1 = no own color): the worklet resolves the
-      // patch tint from control-rate descriptors so tint edits stay LIVE
-      out[o + 3] = d[ti * 6 + 3];
-      out[o + 4] = d[ti * 6 + 4];
-      out[o + 5] = d[ti * 6 + 5];
-    }
-    return out;
+  /** Copies of all constellations for the audio worklet, which samples
+   *  per-generation targets itself (same hashes as the GPU). */
+  cloudData(): (Float32Array | null)[] {
+    return this.slots.map((inst) =>
+      inst && inst.cloud ? inst.cloud.data.slice() : null,
+    );
   }
 
   serialize(): object {

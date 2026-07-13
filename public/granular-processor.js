@@ -93,24 +93,29 @@ class Voice {
     this.i = index; // real particle index
     this.slotJitter = 0.5 + pcg(index + 808); // free-timeline slot-period jitter
     this.phi = pcg(index + 909); // free-timeline phase
-    this.poolRoll = pcg(index + 747); // object pool-slot lottery
-    this.objSlot = Math.min(7, Math.floor(pcg(index + 747) * 8));
     this.sizeRoll = pcg(index + 404); // same roll the GPU sizes sprites with
     this.rgbRand = [pcg(index + 601), pcg(index + 602), pcg(index + 603)];
-    // captured-voice state (derived from voice targets + object descriptor)
+    // free position (this voice's current free-slot home; reach tests)
+    this.fx = 0;
+    this.fy = 0;
+    this.fz = 0;
+    // captured-voice state (derived per assignment/generation)
+    this.asg = -1; // assigned object slot, -1 = free
+    this.asgGen = -1e18;
+    this.asgInvTau = 1;
+    this.asgPhi = 0;
     this.capFreq = 440;
     this.capSat = 0;
     this.capBright = 1;
     this.capTableA = 0;
     this.capTableB = 0;
     this.capTableFrac = 0;
-    this.capGen = -1e18;
     this.capOn = 0;
     this.capAmp = 0;
     this.capPanL = 0.7;
     this.capPanR = 0.7;
     this.capPhase = 0; // separate oscillator phase per timeline — the free
-    this.inReach = false; // clock must never touch a captured grain's phase
+    // clock must never touch a captured grain's phase
 
     // derived on params change
     this.freq = 440;
@@ -157,7 +162,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // centerX, centerY, centerZ, reach}
       objects: [],
     };
-    this.voiceTargets = null; // Float32Array [256 × (x,y,z,r,g,b)]
+    this.clouds = []; // per-slot Float32Array [TARGETS × (x,y,z,r,g,b)]
     this.sine = buildTable([[1, 1]]);
     this.wheel = RECIPES.map(buildTable);
     this.voices = [];
@@ -182,9 +187,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       if (e.data.type === 'params') {
         Object.assign(this.p, e.data.data);
         this.paramsDirty = true;
-      } else if (e.data.type === 'voiceTargets') {
-        this.voiceTargets = e.data.data;
-        this.targetsDirty = true;
+      } else if (e.data.type === 'clouds') {
+        // full constellations: the worklet samples per-generation targets
+        // itself, with the same hashes as the GPU (deterministic twins)
+        this.clouds = e.data.data;
       }
     };
   }
@@ -260,52 +266,6 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       const spread = Math.pow(2, (0.85 - sizeJitter) * 2.2);
       v.freq = Math.min(Math.max(p.registerHz * spread, 30), sampleRate * 0.45);
 
-      // captured-voice tuning: the object's register (with its own pitch
-      // spread) + the voice's target color (image pixel or object tint)
-      // scattered by the object's own color dispersion — same mappings as
-      // the ambient field, blended per property by the object's weights
-      const obj = p.objects[v.objSlot];
-      if (obj && this.voiceTargets) {
-        const srEff = p.sizeRandom + (obj.srV - p.sizeRandom) * obj.srW;
-        const sjCap = (v.sizeRoll - 0.5) * 0.7 * srEff + 0.85;
-        const spreadCap = Math.pow(2, (0.85 - sjCap) * 2.2);
-        v.capFreq = Math.min(
-          Math.max(obj.registerHz * spreadCap, 30),
-          sampleRate * 0.45,
-        );
-        const vt = this.voiceTargets;
-        const k6 = (v.i / p.stride) * 6;
-        // capture color, mirroring the GPU: image target color overrides,
-        // else the object's LIVE tint; scattered by the object's color
-        // dispersion; blended over the voice's ambient color by tintWeight
-        // targets with their own colors (images) blend toward the tint by
-        // the imageColor weight — mirrors the GPU exactly
-        const imgW = (vt[k6 + 3] >= 0 ? 1 : 0) * obj.imgW;
-        const baseR = obj.tintR + (Math.max(0, vt[k6 + 3]) - obj.tintR) * imgW;
-        const baseG = obj.tintG + (vt[k6 + 4] - obj.tintG) * imgW;
-        const baseB = obj.tintB + (vt[k6 + 5] - obj.tintB) * imgW;
-        const crEff = p.colorRandom + (obj.crV - p.colorRandom) * obj.crW;
-        const cr2 = Math.max(0, Math.min(1, crEff));
-        const scatR = baseR * (1 - cr2) + v.rgbRand[0] * cr2;
-        const scatG = baseG * (1 - cr2) + v.rgbRand[1] * cr2;
-        const scatB = baseB * (1 - cr2) + v.rgbRand[2] * cr2;
-        // ambient per-voice color (same as the free path derives)
-        const acr = p.colorRandom;
-        const ambR = p.tint[0] * (1 - acr) + v.rgbRand[0] * acr;
-        const ambG = p.tint[1] * (1 - acr) + v.rgbRand[1] * acr;
-        const ambB = p.tint[2] * (1 - acr) + v.rgbRand[2] * acr;
-        const w = Math.max(obj.tintW, imgW * obj.level);
-        const rr = ambR * (1 - w) + scatR * w;
-        const gg = ambG * (1 - w) + scatG * w;
-        const bb = ambB * (1 - w) + scatB * w;
-        const [h, s, val] = rgbToHsv(rr, gg, bb);
-        const wheelPos = h * n;
-        v.capTableA = Math.floor(wheelPos) % n;
-        v.capTableB = (v.capTableA + 1) % n;
-        v.capTableFrac = wheelPos - Math.floor(wheelPos);
-        v.capSat = s;
-        v.capBright = 0.35 + 0.65 * val;
-      }
       // NOTE: never reset v.gen/v.phase here — parameter updates arrive on
       // the 60Hz control clock, which does not belong to this universe.
       // Touching a running grain's phase clicks 60x/sec (the "trrrr").
@@ -313,55 +273,115 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     }
   }
 
+  /** TRUE ABSORPTION, mirroring the GPU: any object whose reach contains
+   *  this voice's free position may claim it (per-cycle lottery on the
+   *  object's clock, threshold claim·level); lowest slot wins; each cycle
+   *  lands on a FRESH random constellation point. Called at block start
+   *  and on the assigned object's cycle wraps. */
+  evaluateCapture(v, t, spat) {
+    const p = this.p;
+    let pick = -1;
+    let gPick = 0;
+    for (let m = 0; m < p.objects.length; m++) {
+      const o = p.objects[m];
+      if (!o || o.level <= 0.001) continue;
+      const dx = v.fx - o.centerX;
+      const dy = v.fy - o.centerY;
+      const dz = v.fz - o.centerZ;
+      if (dx * dx + dy * dy + dz * dz > o.reach * o.reach) continue;
+      const g = Math.floor(t / o.tau + v.phi * (1 - o.sync));
+      if (h2(v.i, g, 431 + m * 17) < o.claim * o.level) {
+        pick = m;
+        gPick = g;
+        break;
+      }
+    }
+    if (pick === v.asg && (pick < 0 || gPick === v.asgGen)) return;
+    v.asg = pick;
+    if (pick < 0) {
+      v.capOn = 0;
+      return;
+    }
+    const o = p.objects[pick];
+    const cloud = this.clouds[pick];
+    v.asgGen = gPick;
+    v.asgInvTau = 1 / o.tau;
+    v.asgPhi = v.phi * (1 - o.sync);
+    v.capPhase = 0;
+    if (!cloud) {
+      v.capOn = 0;
+      return;
+    }
+    v.capOn = 1;
+    // fresh random constellation point this cycle — same hash as the GPU
+    const ti = Math.floor(h2(v.i, gPick, 517 + pick * 29) * (cloud.length / 6));
+    const px = cloud[ti * 6];
+    const py = cloud[ti * 6 + 1];
+    const pz = cloud[ti * 6 + 2];
+    const rawR = cloud[ti * 6 + 3];
+    this.spatialize(px, py, pz, spat);
+
+    // color -> timbre, mirroring the GPU blend chain
+    const hasCol = rawR >= 0 ? 1 : 0;
+    const imgW = hasCol * o.imgW;
+    const baseR = o.tintR + (Math.max(0, rawR) - o.tintR) * imgW;
+    const baseG = o.tintG + (cloud[ti * 6 + 4] - o.tintG) * imgW;
+    const baseB = o.tintB + (cloud[ti * 6 + 5] - o.tintB) * imgW;
+    const crEff = Math.max(0, Math.min(1, p.colorRandom + (o.crV - p.colorRandom) * o.crW));
+    const scatR = baseR * (1 - crEff) + v.rgbRand[0] * crEff;
+    const scatG = baseG * (1 - crEff) + v.rgbRand[1] * crEff;
+    const scatB = baseB * (1 - crEff) + v.rgbRand[2] * crEff;
+    const acr = p.colorRandom;
+    const ambR = p.tint[0] * (1 - acr) + v.rgbRand[0] * acr;
+    const ambG = p.tint[1] * (1 - acr) + v.rgbRand[1] * acr;
+    const ambB = p.tint[2] * (1 - acr) + v.rgbRand[2] * acr;
+    const w = Math.max(o.tintW, imgW * o.level);
+    const [h, s, val] = rgbToHsv(
+      ambR * (1 - w) + scatR * w,
+      ambG * (1 - w) + scatG * w,
+      ambB * (1 - w) + scatB * w,
+    );
+    const n = this.wheel.length;
+    const wheelPos = h * n;
+    v.capTableA = Math.floor(wheelPos) % n;
+    v.capTableB = (v.capTableA + 1) % n;
+    v.capTableFrac = wheelPos - Math.floor(wheelPos);
+    v.capSat = s;
+    v.capBright = 0.35 + 0.65 * val;
+
+    const srEff = p.sizeRandom + (o.srV - p.sizeRandom) * o.srW;
+    const sj = (v.sizeRoll - 0.5) * 0.7 * srEff + 0.85;
+    v.capFreq = Math.min(
+      Math.max(o.registerHz * Math.pow(2, (0.85 - sj) * 2.2), 30),
+      sampleRate * 0.45,
+    );
+    const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
+    v.capAmp = 0.13 * v.capBright * mag * o.gain * bassBoost(v.capFreq);
+    v.capPanL = bassMono(spat[0] / mag, v.capFreq);
+    v.capPanR = bassMono(spat[1] / mag, v.capFreq);
+  }
+
   /** New FREE-timeline generation: renewal process, matching the GPU —
    *  re-rolled burst duration and a random offset per slot, plus the
    *  object-reach test for this voice's new free position. */
-  refreshFreeGeneration(v, g, obj, spat) {
+  refreshFreeGeneration(v, g, spat) {
     const p = this.p;
     v.gen = g;
     v.phase = 0;
     v.durN = h2(v.i, g, 222) * 0.4 + 0.35;
     v.offN = h2(v.i, g, 111) * (1 - v.durN);
-    const bx = p.boundsMin[0] + h2(v.i, g, 101) * p.boundsSize[0];
-    const by = p.boundsMin[1] + h2(v.i, g, 202) * p.boundsSize[1];
-    const bz = p.boundsMin[2] + h2(v.i, g, 331) * p.boundsSize[2];
-    if (obj) {
-      const dx = bx - obj.centerX;
-      const dy = by - obj.centerY;
-      const dz = bz - obj.centerZ;
-      v.inReach = dx * dx + dy * dy + dz * dz <= obj.reach * obj.reach;
-    } else {
-      v.inReach = false;
-    }
+    v.fx = p.boundsMin[0] + h2(v.i, g, 101) * p.boundsSize[0];
+    v.fy = p.boundsMin[1] + h2(v.i, g, 202) * p.boundsSize[1];
+    v.fz = p.boundsMin[2] + h2(v.i, g, 331) * p.boundsSize[2];
     const alive = h2(v.i, g, 303) < p.density ? 1 : 0;
     if (alive) {
-      this.spatialize(bx, by, bz, spat);
+      this.spatialize(v.fx, v.fy, v.fz, spat);
       const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
       v.amp = 0.1 * v.bright * mag * bassBoost(v.freq);
       v.panL = bassMono(spat[0] / mag, v.freq);
       v.panR = bassMono(spat[1] / mag, v.freq);
     } else {
       v.amp = 0;
-    }
-  }
-
-  /** New CAPTURED-timeline generation: the object's per-cycle lottery,
-   *  spatialized at the voice's actual target in the constellation. */
-  refreshCapturedGeneration(v, g, obj, slotSalt, spat) {
-    v.capGen = g;
-    v.capPhase = 0;
-    v.capOn =
-      v.inReach && h2(v.i, g, slotSalt) < obj.claim * obj.level ? 1 : 0;
-    if (v.capOn && this.voiceTargets) {
-      const k6 = (v.i / this.p.stride) * 6;
-      const vt = this.voiceTargets;
-      this.spatialize(vt[k6], vt[k6 + 1], vt[k6 + 2], spat);
-      const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
-      v.capAmp = 0.13 * v.capBright * mag * obj.gain * bassBoost(v.capFreq);
-      v.capPanL = bassMono(spat[0] / mag, v.capFreq);
-      v.capPanR = bassMono(spat[1] / mag, v.capFreq);
-    } else {
-      v.capAmp = 0;
     }
   }
 
@@ -395,52 +415,54 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const sine = this.sine;
     let active = 0;
 
+    const anyObjects = p.objects.some((o) => o && o.level > 0.001);
     for (let k = 0; k < VOICES; k++) {
       const v = this.voices[k];
-      const obj = p.objects[v.objSlot];
-      const objOn = obj && obj.level > 0.001;
-      const slotSalt = 431 + v.objSlot * 17;
       // free slots are 1.8x tau (burst + silent gap), matching the GPU
       const invLFree = invTau / (v.slotJitter * 1.8);
-      const invTauObj = objOn ? 1 / obj.tau : 1;
-      const phiObj = objOn ? v.phi * (1 - obj.sync) : 0;
 
       let t = t0;
-      // free timeline (always advancing — reach tests live on it)
+      // free timeline (always advancing — capture reach tests live on it)
       let gF = Math.floor(t * invLFree + v.phi);
-      if (gF !== v.gen) this.refreshFreeGeneration(v, gF, obj, spat);
-      // object timeline
-      if (objOn) {
-        const gO = Math.floor(t * invTauObj + phiObj);
-        if (gO !== v.capGen) this.refreshCapturedGeneration(v, gO, obj, slotSalt, spat);
-      } else {
-        v.capOn = 0;
-      }
+      if (gF !== v.gen) this.refreshFreeGeneration(v, gF, spat);
+      // absorption: which object (if any) claims this voice right now
+      if (anyObjects) this.evaluateCapture(v, t, spat);
+      else v.capOn = 0;
       if ((v.capOn ? v.capAmp : v.amp) > 0.0002) active++;
 
       // fast path: a silent voice with no generation boundary inside this
       // block contributes nothing — skip its sample loop entirely
-      if (v.amp * p.fieldGain <= 0.0002 && (!objOn || v.capAmp * p.objectGain <= 0.0002)) {
+      if (v.amp * p.fieldGain <= 0.0002 && (!anyObjects || v.capAmp * p.objectGain <= 0.0002)) {
         const tEnd = t0 + n * dt;
         const nextF = (v.gen + 1 - v.phi) / invLFree;
-        const nextO = objOn ? (v.capGen + 1 - phiObj) / invTauObj : Infinity;
-        if (nextF > tEnd && nextO > tEnd) continue;
+        const nextO = v.capOn ? (v.asgGen + 1 - v.asgPhi) / v.asgInvTau : Infinity;
+        if (nextF > tEnd && nextO > tEnd && !anyObjects) continue;
+        if (nextF > tEnd && nextO > tEnd && anyObjects) {
+          // capture opportunities can still arise mid-block only at
+          // object-cycle boundaries; approximate by skipping — the next
+          // block (2.7ms) re-evaluates
+          continue;
+        }
       }
-
-      const capLUT = objOn ? objEnvLUT[v.objSlot] || envLUT : envLUT;
 
       for (let s = 0; s < n; s++) {
         const xF = t * invLFree + v.phi;
         const gFn = Math.floor(xF);
-        if (gFn !== v.gen) this.refreshFreeGeneration(v, gFn, obj, spat);
+        if (gFn !== v.gen) {
+          this.refreshFreeGeneration(v, gFn, spat);
+          // new free position: capture eligibility may have changed
+          if (anyObjects) this.evaluateCapture(v, t, spat);
+        }
 
-        let captured = 0;
+        let captured = v.capOn;
         let xO = 0;
-        if (objOn) {
-          xO = t * invTauObj + phiObj;
-          const gOn = Math.floor(xO);
-          if (gOn !== v.capGen) this.refreshCapturedGeneration(v, gOn, obj, slotSalt, spat);
-          captured = v.capOn;
+        if (captured) {
+          xO = t * v.asgInvTau + v.asgPhi;
+          if (Math.floor(xO) !== v.asgGen) {
+            this.evaluateCapture(v, t, spat);
+            captured = v.capOn;
+            if (captured) xO = t * v.asgInvTau + v.asgPhi;
+          }
         }
 
         // environment and instruments have separate faders
@@ -449,11 +471,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           // captured: duty-gapped pulse on the object's clock (order);
           // free: jittered burst inside its slot (renewal — no clock)
           const aa = captured
-            ? (xO - v.capGen) / 0.6
+            ? (xO - v.asgGen) / 0.6
             : (xF - gFn - v.offN) / v.durN;
           if (aa > 0 && aa < 1) {
             // baked envelope — no pow in the hot loop
-            const env = (captured ? capLUT : envLUT)[(aa * ENV_LUT_SIZE) | 0];
+            const lutC = captured ? objEnvLUT[v.asg] || envLUT : envLUT;
+            const env = lutC[(aa * ENV_LUT_SIZE) | 0];
             if (env > 0.0001) {
               const idx = (captured ? v.capPhase : v.phase) & TABLE_MASK;
               const pure = sine[idx];

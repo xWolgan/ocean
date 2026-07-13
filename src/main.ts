@@ -116,6 +116,7 @@ let statsTimer = 0;
 // dev hook for automated verification and console experiments
 Object.assign(window, {
   __ocean: { bus, objects, state: bus.out, audio, renderer, get field() { return field; } },
+  __oceanSetCount: setParticleCount,
 });
 console.log('[ocean] backend:', renderer.backend.constructor.name);
 

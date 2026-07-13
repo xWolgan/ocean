@@ -104,9 +104,10 @@ export class ParticleField {
   private readonly uObjF = uniformArray(
     Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(0.94, 1, 0, 0)),
   );
-  // G: (imageColorWeight, spare, spare, spare)
+  // G: (imageColorWeight, jitterX, jitterY, jitterZ) — jitter is the
+  // capture scatter half-extent per axis: max(spatialSmear, cell/2)
   private readonly uObjG = uniformArray(
-    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(1, 0, 0, 0)),
+    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(1, 0.05, 0.05, 0.05)),
   );
 
   constructor(count: number, targetTexture: THREE.DataTexture) {
@@ -155,52 +156,79 @@ export class ParticleField {
       .mul(a)
       .mul(slotPeriod.mul(durN));
 
-    // --- objects: each particle belongs to ONE pool slot; the object in
-    // that slot may capture it (per-cycle lottery scaled by its envelope
-    // level, gated by its influence reach around the free position).
-    const poolRoll = hash(i.add(uint(747)));
-    const slotIdx = floor(poolRoll.mul(SLOT_COUNT)).min(SLOT_COUNT - 1).toInt();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const oA = vec4(this.uObjA.element(slotIdx) as any);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const oB = vec4(this.uObjB.element(slotIdx) as any);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const oC = vec4(this.uObjC.element(slotIdx) as any);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const oD = vec4(this.uObjD.element(slotIdx) as any);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const oE = vec4(this.uObjE.element(slotIdx) as any);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const oF = vec4(this.uObjF.element(slotIdx) as any);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const oG = vec4(this.uObjG.element(slotIdx) as any);
-    const tauObj = oC.x.max(0.0005);
+    // --- objects: TRUE ABSORPTION. Any object may capture any particle
+    // whose free spawn falls within its reach (per-cycle lottery scaled
+    // by claim·level) — at full claim the surroundings visibly EMPTY into
+    // the object. Each rebirth lands at a FRESH random point of the
+    // constellation (per-generation target + cell jitter): particles
+    // paint the object, they don't own seats on it. Overlapping reaches:
+    // the lowest slot index wins. All accumulated with one pass of mixes.
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    let taken: any = float(0);
+    let capXO: any = float(0);
+    let capTau: any = float(0.02);
+    let capPos: any = vec3(0, 0, 0);
+    let capTexCol: any = vec3(0, 0, 0);
+    let capHasCol: any = float(0);
+    let capLevel: any = float(0);
+    let capSizeEff: any = this.uSize;
+    let capTint: any = vec3(1, 1, 1);
+    let capTintW: any = float(0);
+    let capCrEff: any = float(0);
+    let capSrEff: any = this.uSizeRandom;
+    let capK: any = this.uSmearK;
+    let capC: any = this.uAsymC;
+    let capImgW: any = float(0);
+    let capSmearRaw: any = this.uSmear;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
 
-    // the object's clock: sync blends each particle's private phase toward
-    // the shared one — 0 = textured cloud at the object's rate, 1 = unison
-    const phiObj = hash(i.add(uint(909))).mul(float(1).sub(oA.z));
-    const xO = this.uTime.div(tauObj).add(phiObj);
-    const gO = floor(xO);
-    const lotterySalt = uint(431).add(uint(SLOT_COUNT).mul(0)).add(slotIdx.toUint().mul(uint(17)));
-    const lotteryRoll = hash(
-      i.mul(uint(1009)).add(gO.toUint().mul(uint(9176))).add(lotterySalt),
-    );
-    const inReach = step(length(freePos.sub(oB.xyz)), oB.w);
-    const captured = step(lotteryRoll, oA.x).mul(inReach);
+    for (let m = 0; m < SLOT_COUNT; m++) {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const A = vec4(this.uObjA.element(m) as any);
+      const B = vec4(this.uObjB.element(m) as any);
+      const C = vec4(this.uObjC.element(m) as any);
+      const D = vec4(this.uObjD.element(m) as any);
+      const E = vec4(this.uObjE.element(m) as any);
+      const F = vec4(this.uObjF.element(m) as any);
+      const G = vec4(this.uObjG.element(m) as any);
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+      const tau = C.x.max(0.0005);
+      // the object's clock: sync blends private phase toward unison
+      const phiObj = hash(i.add(uint(909))).mul(float(1).sub(A.z));
+      const xO = this.uTime.div(tau).add(phiObj);
+      const gO = xO.floor();
+      const roll = h2(gO, 431 + m * 17);
+      const inReach = step(length(freePos.sub(B.xyz)), B.w);
+      const elig = step(roll, A.x).mul(inReach).mul(float(1).sub(taken));
 
-    // the constellation: this particle's stable target in the object's cloud
-    const tIdx = floor(hash(i.add(uint(517))).mul(TARGETS_PER_OBJECT)).toInt();
-    const rowPos = slotIdx.mul(2);
-    const posTexel = textureLoad(targetTexture, ivec2(tIdx, rowPos));
-    const colTexel = textureLoad(targetTexture, ivec2(tIdx, rowPos.add(1)));
-    const jitter = vec3(
-      hash(i.add(uint(761))),
-      hash(i.add(uint(862))),
-      hash(i.add(uint(963))),
-    )
-      .sub(0.5)
-      .mul(oA.y.mul(2));
-    const capturedPos = posTexel.xyz.add(jitter);
+      // fresh random constellation point EVERY cycle (per-generation)
+      const tIdx = floor(h2(gO, 517 + m * 29).mul(TARGETS_PER_OBJECT)).toInt();
+      const posTexel = textureLoad(targetTexture, ivec2(tIdx, m * 2));
+      const colTexel = textureLoad(targetTexture, ivec2(tIdx, m * 2 + 1));
+      const jit = vec3(h2(gO, 761 + m * 31), h2(gO, 862 + m * 31), h2(gO, 963 + m * 31))
+        .sub(0.5)
+        .mul(2)
+        .mul(G.yzw);
+
+      taken = taken.add(elig);
+      capXO = mix(capXO, xO, elig);
+      capTau = mix(capTau, tau, elig);
+      capPos = mix(capPos, posTexel.xyz.add(jit), elig);
+      capTexCol = mix(capTexCol, colTexel.xyz, elig);
+      capHasCol = mix(capHasCol, colTexel.w, elig);
+      capLevel = mix(capLevel, A.w, elig);
+      capSizeEff = mix(capSizeEff, mix(this.uSize, C.y, C.z), elig);
+      capTint = mix(capTint, D.xyz, elig);
+      capTintW = mix(capTintW, C.w, elig);
+      capCrEff = mix(capCrEff, mix(this.uColorRandom, E.x, E.y), elig);
+      capSrEff = mix(capSrEff, mix(this.uSizeRandom, E.z, E.w), elig);
+      capK = mix(capK, mix(this.uSmearK, F.x, F.z), elig);
+      capC = mix(capC, mix(this.uAsymC, F.y, F.w), elig);
+      capImgW = mix(capImgW, G.x, elig);
+      capSmearRaw = mix(capSmearRaw, mix(this.uSmear, D.w, F.z), elig);
+    }
+    const captured = taken.min(1);
+    const capturedPos = capPos;
 
     // --- choose timeline per particle ---
     const position = mix(freePos.add(drift), capturedPos, captured);
@@ -222,15 +250,13 @@ export class ParticleField {
     // captured envelope: the frame is a camera EXPOSURE, not a sample —
     // stratified sampling of the object's pulse over [t, t+dt] so coherent
     // clouds cannot strobe against the refresh rate (a foreign clock).
-    const kCap = mix(this.uSmearK, oF.x, oF.z);
-    const cCap = mix(this.uAsymC, oF.y, oF.w);
-    const dx = this.uDeltaTime.div(tauObj);
+    const dx = this.uDeltaTime.div(capTau);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let acc: any = float(0);
     const EXPOSURE_SAMPLES = 8;
     for (let s = 0; s < EXPOSURE_SAMPLES; s++) {
-      const aCap = fract(xO.add(dx.mul((s + 0.5) / EXPOSURE_SAMPLES))).div(0.6);
-      acc = acc.add(envFn(aCap, kCap, cCap));
+      const aCap = fract(capXO.add(dx.mul((s + 0.5) / EXPOSURE_SAMPLES))).div(0.6);
+      acc = acc.add(envFn(aCap, capK, capC));
     }
     const meanEnvCap = acc.div(EXPOSURE_SAMPLES);
 
@@ -248,13 +274,13 @@ export class ParticleField {
     // the geometry; free bursts gate on/off, captured stay lit and pulse.
     // sizeRandom is the dispersion dial: 0 = uniform size (one pitch).
     // objects may impose their own size dispersion (pitch spread)
-    const srEff = mix(this.uSizeRandom, oE.z, oE.w.mul(captured));
+    const srEff = mix(this.uSizeRandom, capSrEff, captured);
     const sizeJitter = hash(i.add(uint(404)))
       .sub(0.5)
       .mul(srEff.mul(0.7))
       .add(0.85);
     // an object may impose its register on captured matter (size = pitch)
-    const effSize = mix(this.uSize, oC.y, oC.z.mul(captured));
+    const effSize = mix(this.uSize, capSizeEff, captured);
     material.scaleNode = effSize
       .mul(sizeJitter)
       .mul(mix(aliveFree, float(1), captured));
@@ -268,27 +294,24 @@ export class ParticleField {
       hash(i.add(uint(603))),
     );
     const ambientCol = mix(this.uTint, randomColor, this.uColorRandom);
-    // captured matter takes the object's tint (or the image's own pixel
-    // color, which overrides fully — the image IS its colors), scattered
-    // by the object's own color dispersion
-    const crEff = mix(this.uColorRandom, oE.x, oE.y.mul(captured));
-    // targets with their own colors (images) blend toward the tint by the
-    // imageColor weight: 1 = the image's colors, 0 = the settings' tint
-    const imgW = colTexel.w.mul(oG.x);
+    // captured color: image pixels blend toward the tint by imageColor
+    // weight, scattered by the object's own color dispersion
+    const crEff = capCrEff.mul(captured);
+    const imgW = capHasCol.mul(capImgW);
     const capturedTint = mix(
-      mix(oD.xyz, colTexel.xyz, imgW),
+      mix(capTint, capTexCol, imgW),
       randomColor,
       crEff,
     );
-    const tintMixW = oC.w.max(imgW.mul(oA.w)).mul(captured);
+    const tintMixW = capTintW.max(imgW.mul(capLevel)).mul(captured);
     const col = mix(ambientCol, capturedTint, tintMixW);
     material.colorNode = col
       .mul(bright.mul(0.9).add(0.05))
       .mul(captured.mul(0.8).add(1));
 
     // smear also softens the flash in SPACE: the same window, spatially;
-    // captured matter may take the object's smear (raw value in D.w)
-    const smearEff = mix(this.uSmear, oD.w, oF.z.mul(captured));
+    // captured matter may take the object's smear
+    const smearEff = mix(this.uSmear, capSmearRaw, captured);
     const d = length(uv().sub(0.5));
     const innerEdge = mix(float(0.38), float(0.02), smearEff);
     material.opacityNode = smoothstep(innerEdge, 0.5, d).oneMinus().mul(0.85);
@@ -359,7 +382,13 @@ export class ParticleField {
         p.smear.weight * inst.level,
         p.asymmetry.weight * inst.level,
       );
-      G[m].set(p.imageColor, 0, 0, 0);
+      const cell = inst.cloud.cell;
+      G[m].set(
+        p.imageColor,
+        Math.max(inst.def.spatialSmear, cell[0] / 2),
+        Math.max(inst.def.spatialSmear, cell[1] / 2),
+        Math.max(inst.def.spatialSmear, cell[2] / 2),
+      );
     }
   }
 
