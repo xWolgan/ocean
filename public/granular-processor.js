@@ -73,6 +73,12 @@ function bassMono(pan, freq, center = 0.7071) {
   return center + (pan - center) * w;
 }
 
+/** SWAPPED mapping: hue is the pitch axis (±1.1 octave around the
+ *  register). Hue 0.5 (cyan-ish) sits at the register itself. */
+function hueToFreq(hue, registerHz) {
+  return Math.min(Math.max(registerHz * Math.pow(2, (hue - 0.5) * 2.2), 30), sampleRate * 0.45);
+}
+
 function rgbToHsv(r, g, b) {
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
@@ -122,6 +128,7 @@ class Voice {
     this.freeTableB = 0;
     this.freeTableFrac = 0;
     this.freeSat = 0;
+    this.freeFreq = 440;
     // derived on params change
     this.freq = 440;
     this.sat = 0;
@@ -261,18 +268,17 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       const g = p.tint[1] * (1 - cr) + v.rgbRand[1] * cr;
       const b = p.tint[2] * (1 - cr) + v.rgbRand[2] * cr;
       const [h, s, val] = rgbToHsv(r, g, b);
-      // hue -> which secondary tones; saturation -> how much; value -> volume
-      const wheelPos = h * n;
+      // SWAPPED mapping (Wolgan): COLOR (hue) -> pitch; SIZE -> which
+      // secondary tones; saturation -> how much; value -> volume.
+      // colorRandom therefore spreads PITCH; sizeRandom spreads TIMBRE.
+      v.freq = hueToFreq(h, p.registerHz);
+      const sizeNorm = 0.5 + (v.sizeRoll - 0.5) * p.sizeRandom;
+      const wheelPos = sizeNorm * n;
       v.tableA = Math.floor(wheelPos) % n;
       v.tableB = (v.tableA + 1) % n;
       v.tableFrac = wheelPos - Math.floor(wheelPos);
       v.sat = s;
       v.bright = 0.35 + 0.65 * val;
-      // size -> pitch, big = low (same jitter the GPU uses for sprite size);
-      // sizeRandom is the dispersion: 0 = uniform size = one tone
-      const sizeJitter = (v.sizeRoll - 0.5) * 0.7 * p.sizeRandom + 0.85;
-      const spread = Math.pow(2, (0.85 - sizeJitter) * 2.2);
-      v.freq = Math.min(Math.max(p.registerHz * spread, 30), sampleRate * 0.45);
 
       // NOTE: never reset v.gen/v.phase here — parameter updates arrive on
       // the 60Hz control clock, which does not belong to this universe.
@@ -379,19 +385,16 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       ambB * (1 - w) + scatB * w,
     );
     const n = this.wheel.length;
-    const wheelPos = h * n;
+    // SWAPPED mapping: captured hue -> pitch; captured size -> recipe
+    v.capFreq = hueToFreq(h, o.registerHz);
+    const srEff = p.sizeRandom + (o.srV - p.sizeRandom) * o.srW;
+    const sizeNorm = 0.5 + (v.sizeRoll - 0.5) * srEff;
+    const wheelPos = sizeNorm * n;
     v.capTableA = Math.floor(wheelPos) % n;
     v.capTableB = (v.capTableA + 1) % n;
     v.capTableFrac = wheelPos - Math.floor(wheelPos);
     v.capSat = s;
     v.capBright = 0.35 + 0.65 * val;
-
-    const srEff = p.sizeRandom + (o.srV - p.sizeRandom) * o.srW;
-    const sj = (v.sizeRoll - 0.5) * 0.7 * srEff + 0.85;
-    v.capFreq = Math.min(
-      Math.max(o.registerHz * Math.pow(2, (0.85 - sj) * 2.2), 30),
-      sampleRate * 0.45,
-    );
     const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
     v.capAmp = 0.13 * v.capBright * mag * o.gain * bassBoost(v.capFreq);
     v.capPanL = bassMono(spat[0] / mag, v.capFreq);
@@ -416,6 +419,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     v.freeTableB = v.tableB;
     v.freeTableFrac = v.tableFrac;
     v.freeSat = v.sat;
+    v.freeFreq = v.freq;
     let bright = v.bright;
     for (let m = 0; m < p.objects.length; m++) {
       const o = p.objects[m];
@@ -441,11 +445,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         ambG + (im.data[q + 1] / 255 - ambG) * w,
         ambB + (im.data[q + 2] / 255 - ambB) * w,
       );
-      const n = this.wheel.length;
-      const wp = h * n;
-      v.freeTableA = Math.floor(wp) % n;
-      v.freeTableB = (v.freeTableA + 1) % n;
-      v.freeTableFrac = wp - Math.floor(wp);
+      // SWAPPED mapping: the dressed hue retunes the voice's pitch;
+      // its recipe stays with the voice's size
+      v.freeFreq = hueToFreq(h, p.registerHz);
       v.freeSat = sSat;
       bright = 0.35 + 0.65 * val;
       break;
@@ -454,9 +456,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     if (alive) {
       this.spatialize(v.fx, v.fy, v.fz, spat);
       const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
-      v.amp = 0.1 * bright * mag * bassBoost(v.freq);
-      v.panL = bassMono(spat[0] / mag, v.freq);
-      v.panR = bassMono(spat[1] / mag, v.freq);
+      v.amp = 0.1 * bright * mag * bassBoost(v.freeFreq);
+      v.panL = bassMono(spat[0] / mag, v.freeFreq);
+      v.panR = bassMono(spat[1] / mag, v.freeFreq);
     } else {
       v.amp = 0;
     }
@@ -573,7 +575,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           if (captured) {
             v.capPhase = (v.capPhase + (v.capFreq / sampleRate) * TABLE_SIZE) % TABLE_SIZE;
           } else {
-            v.phase = (v.phase + (v.freq / sampleRate) * TABLE_SIZE) % TABLE_SIZE;
+            v.phase = (v.phase + (v.freeFreq / sampleRate) * TABLE_SIZE) % TABLE_SIZE;
           }
         }
         t += dt;

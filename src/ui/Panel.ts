@@ -31,17 +31,17 @@ export function createPanel(
   // --- ambient substance ---
   const field = gui.addFolder('field');
   field.add(base, 'density', 0, 1, 0.001).name('density').listen();
-  field.add(base, 'scale', 0, 1, 0.001).name('scale (pitch: big = low)').listen();
+  field.add(base, 'scale', 0, 1, 0.001).name('scale (register)').listen();
   field.add(base, 'lifespan', 0, 1, 0.001).name('lifespan (duration)').listen();
   field.add(base, 'smear', 0, 1, 0.001).name('smear').listen();
   field.add(base, 'asymmetry', -1, 1, 0.001).name('asymmetry').listen();
   field.close();
 
   const color = gui.addFolder('color');
-  color.addColor(bus, 'baseTint').name('tint').listen();
+  color.addColor(bus, 'baseTint').name('tint (hue→pitch, sat→richness)').listen();
   const rand = gui.addFolder('randomness');
-  rand.add(base, 'colorRandom', 0, 1, 0.001).name('color (timbre)').listen();
-  rand.add(base, 'sizeRandom', 0, 1, 0.001).name('size (pitch spread)').listen();
+  rand.add(base, 'colorRandom', 0, 1, 0.001).name('color (pitch spread)').listen();
+  rand.add(base, 'sizeRandom', 0, 1, 0.001).name('size (timbre spread)').listen();
   color.close();
   rand.close();
 
@@ -124,9 +124,9 @@ export function createPanel(
       tuning.add(g, 'thickness', 0.001, 0.2, 0.001).name('surface thickness (m)');
       tuning.add(g, 'zeroThickness').name('zero thickness (exact plane)');
     }
-    tuning.add(p.colorRandom, 'value', 0, 1, 0.001).name('color random (timbre)');
+    tuning.add(p.colorRandom, 'value', 0, 1, 0.001).name('color random (pitch spread)');
     tuning.add(p.colorRandom, 'weight', 0, 1, 0.01).name('  ↳ weight');
-    tuning.add(p.sizeRandom, 'value', 0, 1, 0.001).name('size random (pitch spread)');
+    tuning.add(p.sizeRandom, 'value', 0, 1, 0.001).name('size random (timbre spread)');
     tuning.add(p.sizeRandom, 'weight', 0, 1, 0.01).name('  ↳ weight');
     tuning.add(p.smear, 'value', 0, 1, 0.001).name('smear');
     tuning.add(p.smear, 'weight', 0, 1, 0.01).name('  ↳ weight');
