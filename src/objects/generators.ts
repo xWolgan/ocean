@@ -2,13 +2,17 @@ import * as THREE from 'three/webgpu';
 import type { GeneratorDef } from './ObjectDef';
 
 /** Targets per object: [x, y, z, r, g, b] × TARGETS. */
-export const TARGETS_PER_OBJECT = 2048;
+export const TARGETS_PER_OBJECT = 8192;
 
 export interface TargetCloud {
   /** TARGETS_PER_OBJECT × 6 floats. */
   data: Float32Array;
   center: THREE.Vector3;
   boundRadius: number;
+  /** Cell size around each target (meters, per axis): captured particles
+   *  scatter within it so they FILL the object instead of stacking on
+   *  discrete targets. Images set it to their pixel-cell; others 0. */
+  cell: [number, number, number];
 }
 
 /** Deterministic PRNG so a saved scene regenerates identical clouds. */
@@ -29,7 +33,7 @@ function seedFromId(id: string): number {
   return h >>> 0;
 }
 
-function finalize(data: Float32Array): TargetCloud {
+function finalize(data: Float32Array, cell: [number, number, number] = [0, 0, 0]): TargetCloud {
   const K = TARGETS_PER_OBJECT;
   const c = new THREE.Vector3();
   for (let k = 0; k < K; k++) c.add(new THREE.Vector3(data[k * 6], data[k * 6 + 1], data[k * 6 + 2]));
@@ -41,7 +45,7 @@ function finalize(data: Float32Array): TargetCloud {
     const dz = data[k * 6 + 2] - c.z;
     r2 = Math.max(r2, dx * dx + dy * dy + dz * dz);
   }
-  return { data, center: c, boundRadius: Math.sqrt(r2) };
+  return { data, center: c, boundRadius: Math.sqrt(r2), cell };
 }
 
 const NO_COLOR = -1; // sentinel: use the object's patch tint, not target color
@@ -183,6 +187,9 @@ export async function buildTargets(gen: GeneratorDef, id: string): Promise<Targe
         img.data[p * 4 + 2] / 255,
       );
     }
+    // captured particles fill each target's pixel-cell: the image becomes
+    // continuous paint — more particles = denser, never just brighter dots
+    return finalize(data, [w / img.width, h / img.height, 0]);
   }
   return finalize(data);
 }

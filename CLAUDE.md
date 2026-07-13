@@ -18,9 +18,10 @@ compute the SAME function from the same PCG hashes on a shared clock.
 
 **Any change to the shared math must be made identically in BOTH files**:
 same formulas, same hash salts (101/202/331 free position, 303 density
-lottery, 222/111 burst shape, 404 size, 601-603 color, 747 pool slot,
-808 slot period, 909 phase, 517 target index, 431+slot*17 capture
-lottery), same envelope math, same tau/octave scaling. `pcgHash` in
+lottery, 222/111 burst shape, 404 size, 601-603 color, 808 slot period,
+909 phase; per object slot m, per object-generation g: 431+m*17 capture
+lottery, 517+m*29 target index, 761/862/963+m*31 cell jitter), same
+envelope math, same tau/octave scaling. `pcgHash` in
 ParticleField.ts is the bit-exact JS replica of TSL's `hash()` — never
 let them diverge. If you change one side and not the other, image and
 sound silently stop being the same thing, which breaks the artwork's

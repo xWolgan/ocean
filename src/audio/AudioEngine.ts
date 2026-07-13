@@ -73,11 +73,15 @@ export class AudioEngine {
 
     const ambientRegisterHz = 180 * Math.pow(20, 1 - state.scale);
 
-    // per-voice targets change only when constellations change
+    // ship full constellations only when they change; the worklet samples
+    // per-generation targets itself with the same hashes as the GPU
     if (objects.version !== this.lastTargetsVersion) {
       this.lastTargetsVersion = objects.version;
-      const vt = objects.voiceTargets(stride);
-      this.node.port.postMessage({ type: 'voiceTargets', data: vt }, [vt.buffer]);
+      const clouds = objects.cloudData();
+      this.node.port.postMessage(
+        { type: 'clouds', data: clouds },
+        clouds.filter((c): c is Float32Array => c !== null).map((c) => c.buffer),
+      );
     }
 
     this.node.port.postMessage({

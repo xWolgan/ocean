@@ -83,14 +83,17 @@ release 0.9 s) — gates the selected object. Live-patchable in console:
 
 ## 6. Objects (instruments)
 
-An object = **constellation** (2048 targets, optional per-target colors)
-+ **weighted patch** + **AR envelope** + **influence**. Max 8 concurrent
-(one per pool slot; a particle's slot = floor(poolHash·8)).
+An object = **constellation** (8192 targets, optional per-target colors)
++ **weighted patch** + **AR envelope** + **influence**. Max 8 concurrent.
 
-- Capture: per-cycle lottery on the object's own clock, threshold
-  claim·envelopeLevel, gated by influence reach (free position within
-  boundRadius+influenceRadius of the constellation center). Captured
-  matter respawns at its stable target point (+ spatial smear jitter).
+- Capture = TRUE ABSORPTION: any object may claim any particle whose free
+  spawn falls within its reach (per-cycle lottery on the object's clock,
+  threshold claim·level; overlapping reaches: lowest slot wins). At full
+  claim the surroundings visibly EMPTY into the object. Each rebirth
+  lands at a FRESH random constellation point (per-generation target +
+  cell jitter): particles paint the object rather than owning seats on
+  it. Images carry an intrinsic pixel-cell so particles tile them into
+  continuous paint; more particles = denser image.
 - Each object has its OWN clock: tau_obj = lifespanToTau(patch.lifespan)
   / 2^octave. Objects therefore form chords with each other.
 - sync (0–1): blends private phases toward unison — textured cloud ↔
