@@ -168,6 +168,9 @@ sample of real particles; bit-exact hash twin of the GPU).
   (typecheck, worklet check, build, docs guard).
 - Docs system: this SPEC (state) + `intents/<branch>.md` (why, per
   branch) + `intents/merged/` (the lab notebook of merged ideas).
+- Provenance duty (CLAUDE.md): Claudes cross-reference git history with
+  intent files to guard intentional choices across studios, explain
+  behavior with its reasons, and brief each human on the other's merges.
 
 ## Not yet built (agreed direction)
 
