@@ -279,9 +279,14 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         // else the object's LIVE tint; scattered by the object's color
         // dispersion; blended over the voice's ambient color by tintWeight
         const hasColor = vt[k6 + 3] >= 0 ? 1 : 0;
-        const baseR = hasColor ? vt[k6 + 3] : obj.tintR;
-        const baseG = hasColor ? vt[k6 + 4] : obj.tintG;
-        const baseB = hasColor ? vt[k6 + 5] : obj.tintB;
+        // tint as a GEL over targets with their own colors (images):
+        // multiplicative, scaled by tintWeight — mirrors the GPU exactly
+        const gelR = 1 + (obj.tintR - 1) * obj.tintW;
+        const gelG = 1 + (obj.tintG - 1) * obj.tintW;
+        const gelB = 1 + (obj.tintB - 1) * obj.tintW;
+        const baseR = hasColor ? vt[k6 + 3] * gelR : obj.tintR;
+        const baseG = hasColor ? vt[k6 + 4] * gelG : obj.tintG;
+        const baseB = hasColor ? vt[k6 + 5] * gelB : obj.tintB;
         const crEff = p.colorRandom + (obj.crV - p.colorRandom) * obj.crW;
         const cr2 = Math.max(0, Math.min(1, crEff));
         const scatR = baseR * (1 - cr2) + v.rgbRand[0] * cr2;

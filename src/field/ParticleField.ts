@@ -266,7 +266,14 @@ export class ParticleField {
     // color, which overrides fully — the image IS its colors), scattered
     // by the object's own color dispersion
     const crEff = mix(this.uColorRandom, oE.x, oE.y.mul(captured));
-    const capturedTint = mix(mix(oD.xyz, colTexel.xyz, colTexel.w), randomColor, crEff);
+    // the tint acts as a GEL over targets that carry their own colors
+    // (images): multiplicative, scaled by tintWeight — white = neutral
+    const gel = mix(vec3(1, 1, 1), oD.xyz, oC.w);
+    const capturedTint = mix(
+      mix(oD.xyz, colTexel.xyz.mul(gel), colTexel.w),
+      randomColor,
+      crEff,
+    );
     const tintMixW = oC.w.max(colTexel.w.mul(oA.w)).mul(captured);
     const col = mix(ambientCol, capturedTint, tintMixW);
     material.colorNode = col
