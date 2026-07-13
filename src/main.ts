@@ -44,13 +44,13 @@ controls.mouseButtons = {
   RIGHT: THREE.MOUSE.ROTATE,
 };
 
-let field = new ParticleField(settings.particleCount, objects.targetTexture);
+let field = new ParticleField(settings.particleCount, objects.targetTexture, objects.imageTextures);
 scene.add(field.mesh);
 
 function setParticleCount(count: number): void {
   scene.remove(field.mesh);
   field.dispose();
-  field = new ParticleField(count, objects.targetTexture);
+  field = new ParticleField(count, objects.targetTexture, objects.imageTextures);
   scene.add(field.mesh);
 }
 

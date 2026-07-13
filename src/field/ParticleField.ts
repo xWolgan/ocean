@@ -22,8 +22,8 @@ import {
 } from 'three/tsl';
 import type { FieldState } from '../state/FieldState';
 import { FIELD_CENTER, FIELD_HALF_EXTENTS } from '../state/FieldState';
-import { TARGETS_PER_OBJECT } from '../objects/generators';
-import { SLOT_COUNT, type ObjectManager } from '../objects/ObjectManager';
+import { TARGETS_PER_OBJECT, IMAGE_TEX } from '../objects/generators';
+import { SLOT_COUNT, effectiveThickness, type ObjectManager } from '../objects/ObjectManager';
 
 /**
  * The substance, v3: a stochastic point process rendered twice.
@@ -109,13 +109,17 @@ export class ParticleField {
   private readonly uObjG = uniformArray(
     Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(1, 0.05, 0.05, 0.05)),
   );
-  // H: (gridW, gridH, cellX, cellY) — gridW > 0 marks a GRIDDED cloud
-  // (image canvas): capture samples a continuous (u,v) on the rectangle
+  // H: (isImage, halfW, halfH, thickness) — image PROPERTY FIELDS:
+  // analytic rectangle, color sampled from the full-resolution texture
   private readonly uObjH = uniformArray(
     Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(0, 0, 0, 0)),
   );
 
-  constructor(count: number, targetTexture: THREE.DataTexture) {
+  constructor(
+    count: number,
+    targetTexture: THREE.DataTexture,
+    imageTextures: THREE.DataTexture[],
+  ) {
     this.count = count;
     this.sonicStride = Math.max(1, Math.floor(count / SONIC_COUNT));
 
@@ -207,39 +211,41 @@ export class ParticleField {
       const inReach = step(length(freePos.sub(B.xyz)), B.w);
       const elig = step(roll, A.x).mul(inReach).mul(float(1).sub(taken));
 
-      // fresh random landing EVERY cycle (per-generation). Two cloud
-      // kinds: SCATTERED (geometry: random target + jitter) and GRIDDED
-      // (images: continuous (u,v) on the canvas — cell for color,
-      // fraction for exact position; the point set does not exist).
+      // fresh random landing EVERY cycle (per-generation). Two object
+      // kinds: SCATTERED constellations (geometry: random target +
+      // jitter) and image PROPERTY FIELDS (analytic rectangle; the SOURCE
+      // PIXEL under the continuous (u,v) dresses the particle).
       const uRnd = h2(gO, 517 + m * 29);
       const vRnd = h2(gO, 549 + m * 37);
-      const isGrid = step(1, H.x);
-      const colF = floor(uRnd.mul(H.x.max(1)));
-      const rowF = floor(vRnd.mul(H.y.max(1)));
-      const tIdxScat = floor(uRnd.mul(TARGETS_PER_OBJECT));
-      const tIdxGrid = rowF.mul(H.x.max(1)).add(colF);
-      const tIdx = mix(tIdxScat, tIdxGrid, isGrid).toInt();
+      const isImg = step(0.5, H.x);
+      const tIdx = floor(uRnd.mul(TARGETS_PER_OBJECT)).toInt();
       const posTexel = textureLoad(targetTexture, ivec2(tIdx, m * 2));
       const colTexel = textureLoad(targetTexture, ivec2(tIdx, m * 2 + 1));
       const jitScat = vec3(h2(gO, 761 + m * 31), h2(gO, 862 + m * 31), h2(gO, 963 + m * 31))
         .sub(0.5)
         .mul(2)
         .mul(G.yzw);
-      // in-cell offset: world x follows u, world y runs against v (image
-      // y-down), matching how the grid targets were placed at cell centers
-      const jitGrid = vec3(
-        uRnd.mul(H.x.max(1)).sub(colF).sub(0.5).mul(H.z),
-        vRnd.mul(H.y.max(1)).sub(rowF).sub(0.5).negate().mul(H.w),
-        0,
+      const posScat = posTexel.xyz.add(jitScat);
+      // analytic rectangle landing (paper-thin z within the thickness)
+      const posImg = vec3(
+        B.x.add(uRnd.sub(0.5).mul(H.y.mul(2))),
+        B.y.add(float(0.5).sub(vRnd).mul(H.z.mul(2))),
+        B.z.add(h2(gO, 963 + m * 31).sub(0.5).mul(H.w)),
       );
-      const jit = mix(jitScat, jitGrid, isGrid);
+      const imgTexel = textureLoad(
+        imageTextures[m],
+        ivec2(
+          floor(uRnd.mul(IMAGE_TEX - 1)).toInt(),
+          floor(vRnd.mul(IMAGE_TEX - 1)).toInt(),
+        ),
+      );
 
       taken = taken.add(elig);
       capXO = mix(capXO, xO, elig);
       capTau = mix(capTau, tau, elig);
-      capPos = mix(capPos, posTexel.xyz.add(jit), elig);
-      capTexCol = mix(capTexCol, colTexel.xyz, elig);
-      capHasCol = mix(capHasCol, colTexel.w, elig);
+      capPos = mix(capPos, mix(posScat, posImg, isImg), elig);
+      capTexCol = mix(capTexCol, mix(colTexel.xyz, imgTexel.xyz, isImg), elig);
+      capHasCol = mix(capHasCol, mix(colTexel.w, float(1), isImg), elig);
       capLevel = mix(capLevel, A.w, elig);
       capSizeEff = mix(capSizeEff, mix(this.uSize, C.y, C.z), elig);
       capTint = mix(capTint, D.xyz, elig);
@@ -253,6 +259,37 @@ export class ParticleField {
     }
     const captured = taken.min(1);
     const capturedPos = capPos;
+
+    // property fields DRESS without relocating: matter that happens to lie
+    // within an image's paper-thin slab takes its pixel's properties even
+    // at attraction 0 (attraction moves matter; geometry dresses it).
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    let dressOn: any = float(0);
+    let dressCol: any = vec3(0, 0, 0);
+    let dressW: any = float(0);
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+    for (let m = 0; m < SLOT_COUNT; m++) {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const A = vec4(this.uObjA.element(m) as any);
+      const B = vec4(this.uObjB.element(m) as any);
+      const G = vec4(this.uObjG.element(m) as any);
+      const H = vec4(this.uObjH.element(m) as any);
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+      const isImg = step(0.5, H.x);
+      const inX = step(freePos.x.sub(B.x).abs(), H.y);
+      const inY = step(freePos.y.sub(B.y).abs(), H.z);
+      const inZ = step(freePos.z.sub(B.z).abs(), H.w.mul(0.5));
+      const take = isImg.mul(inX).mul(inY).mul(inZ).mul(float(1).sub(dressOn));
+      const uF = clamp(freePos.x.sub(B.x).div(H.y.mul(2).max(0.0001)).add(0.5), 0, 1);
+      const vF = clamp(float(0.5).sub(freePos.y.sub(B.y).div(H.z.mul(2).max(0.0001))), 0, 1);
+      const texel = textureLoad(
+        imageTextures[m],
+        ivec2(floor(uF.mul(IMAGE_TEX - 1)).toInt(), floor(vF.mul(IMAGE_TEX - 1)).toInt()),
+      );
+      dressOn = dressOn.add(take);
+      dressCol = mix(dressCol, texel.xyz, take);
+      dressW = mix(dressW, G.x.mul(A.w), take);
+    }
 
     // --- choose timeline per particle ---
     const position = mix(freePos.add(drift), capturedPos, captured);
@@ -328,7 +365,8 @@ export class ParticleField {
       crEff,
     );
     const tintMixW = capTintW.max(imgW.mul(capLevel)).mul(captured);
-    const col = mix(ambientCol, capturedTint, tintMixW);
+    const freeDressed = mix(ambientCol, dressCol, dressW.mul(dressOn));
+    const col = mix(freeDressed, capturedTint, tintMixW);
     material.colorNode = col
       .mul(bright.mul(0.9).add(0.05))
       .mul(captured.mul(0.8).add(1));
@@ -414,8 +452,13 @@ export class ParticleField {
         Math.max(inst.def.spatialSmear, cell[1] / 2),
         Math.max(inst.def.spatialSmear, cell[2] / 2),
       );
-      const grid = inst.cloud.grid;
-      H[m].set(grid ? grid[0] : 0, grid ? grid[1] : 0, cell[0], cell[1]);
+      const size = inst.cloud.imageSize;
+      H[m].set(
+        size ? 1 : 0,
+        size ? size[0] / 2 : 0,
+        size ? size[1] / 2 : 0,
+        effectiveThickness(inst.def),
+      );
     }
   }
 

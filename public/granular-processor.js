@@ -117,6 +117,11 @@ class Voice {
     this.capPhase = 0; // separate oscillator phase per timeline — the free
     // clock must never touch a captured grain's phase
 
+    // free-path (possibly image-dressed) timbre
+    this.freeTableA = 0;
+    this.freeTableB = 0;
+    this.freeTableFrac = 0;
+    this.freeSat = 0;
     // derived on params change
     this.freq = 440;
     this.sat = 0;
@@ -163,6 +168,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       objects: [],
     };
     this.clouds = []; // per-slot Float32Array [TARGETS × (x,y,z,r,g,b)]
+    this.audioImages = []; // per-slot {size, data(RGBA8)} for image fields
     this.sine = buildTable([[1, 1]]);
     this.wheel = RECIPES.map(buildTable);
     this.voices = [];
@@ -187,6 +193,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       if (e.data.type === 'params') {
         Object.assign(this.p, e.data.data);
         this.paramsDirty = true;
+      } else if (e.data.type === 'audioImages') {
+        this.audioImages = e.data.data;
       } else if (e.data.type === 'clouds') {
         // full constellations: the worklet samples per-generation targets
         // itself, with the same hashes as the GPU (deterministic twins)
@@ -308,39 +316,54 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     v.asgInvTau = 1 / o.tau;
     v.asgPhi = v.phi * (1 - o.sync);
     v.capPhase = 0;
-    if (!cloud) {
+    if (!cloud && !(o.isImage > 0)) {
       v.capOn = 0;
       return;
     }
     v.capOn = 1;
-    // fresh random landing this cycle — same hashes as the GPU; gridded
-    // clouds (images) sample a continuous (u,v) on the canvas
+    // fresh random landing this cycle — same hashes as the GPU; image
+    // property fields land analytically on the rectangle and take the
+    // SOURCE PIXEL under the continuous (u,v)
     const uRnd = h2(v.i, gPick, 517 + pick * 29);
-    let ti;
-    let ox = 0;
-    let oy = 0;
-    if (o.gridW > 0) {
+    let px;
+    let py;
+    let pz;
+    let rawR;
+    let rawG = 0;
+    let rawB = 0;
+    if (o.isImage > 0) {
       const vRnd = h2(v.i, gPick, 549 + pick * 37);
-      const col = Math.min(o.gridW - 1, Math.floor(uRnd * o.gridW));
-      const row = Math.min(o.gridH - 1, Math.floor(vRnd * o.gridH));
-      ti = row * o.gridW + col;
-      ox = (uRnd * o.gridW - col - 0.5) * o.cellX;
-      oy = -(vRnd * o.gridH - row - 0.5) * o.cellY;
+      px = o.centerX + (uRnd - 0.5) * o.halfW * 2;
+      py = o.centerY + (0.5 - vRnd) * o.halfH * 2;
+      pz = o.centerZ + (h2(v.i, gPick, 963 + pick * 31) - 0.5) * o.thickness;
+      const im = this.audioImages[pick];
+      if (im) {
+        const ix = Math.min(im.size - 1, Math.floor(uRnd * im.size));
+        const iy = Math.min(im.size - 1, Math.floor(vRnd * im.size));
+        const q = (iy * im.size + ix) * 4;
+        rawR = im.data[q] / 255;
+        rawG = im.data[q + 1] / 255;
+        rawB = im.data[q + 2] / 255;
+      } else {
+        rawR = -1;
+      }
     } else {
-      ti = Math.floor(uRnd * (cloud.length / 6));
+      const ti = Math.floor(uRnd * (cloud.length / 6));
+      px = cloud[ti * 6];
+      py = cloud[ti * 6 + 1];
+      pz = cloud[ti * 6 + 2];
+      rawR = cloud[ti * 6 + 3];
+      rawG = cloud[ti * 6 + 4];
+      rawB = cloud[ti * 6 + 5];
     }
-    const px = cloud[ti * 6] + ox;
-    const py = cloud[ti * 6 + 1] + oy;
-    const pz = cloud[ti * 6 + 2];
-    const rawR = cloud[ti * 6 + 3];
     this.spatialize(px, py, pz, spat);
 
     // color -> timbre, mirroring the GPU blend chain
     const hasCol = rawR >= 0 ? 1 : 0;
     const imgW = hasCol * o.imgW;
     const baseR = o.tintR + (Math.max(0, rawR) - o.tintR) * imgW;
-    const baseG = o.tintG + (cloud[ti * 6 + 4] - o.tintG) * imgW;
-    const baseB = o.tintB + (cloud[ti * 6 + 5] - o.tintB) * imgW;
+    const baseG = o.tintG + (rawG - o.tintG) * imgW;
+    const baseB = o.tintB + (rawB - o.tintB) * imgW;
     const crEff = Math.max(0, Math.min(1, p.colorRandom + (o.crV - p.colorRandom) * o.crW));
     const scatR = baseR * (1 - crEff) + v.rgbRand[0] * crEff;
     const scatG = baseG * (1 - crEff) + v.rgbRand[1] * crEff;
@@ -387,11 +410,51 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     v.fx = p.boundsMin[0] + h2(v.i, g, 101) * p.boundsSize[0];
     v.fy = p.boundsMin[1] + h2(v.i, g, 202) * p.boundsSize[1];
     v.fz = p.boundsMin[2] + h2(v.i, g, 331) * p.boundsSize[2];
+    // property fields DRESS without relocating: a free voice inside an
+    // image's paper-thin slab takes that pixel's color (timbre/volume)
+    v.freeTableA = v.tableA;
+    v.freeTableB = v.tableB;
+    v.freeTableFrac = v.tableFrac;
+    v.freeSat = v.sat;
+    let bright = v.bright;
+    for (let m = 0; m < p.objects.length; m++) {
+      const o = p.objects[m];
+      if (!o || !(o.isImage > 0) || o.level <= 0.001) continue;
+      if (Math.abs(v.fx - o.centerX) > o.halfW) continue;
+      if (Math.abs(v.fy - o.centerY) > o.halfH) continue;
+      if (Math.abs(v.fz - o.centerZ) > o.thickness * 0.5) continue;
+      const im = this.audioImages[m];
+      if (!im) break;
+      const u = (v.fx - o.centerX) / (o.halfW * 2) + 0.5;
+      const vv = 0.5 - (v.fy - o.centerY) / (o.halfH * 2);
+      const ix = Math.min(im.size - 1, Math.max(0, Math.floor(u * im.size)));
+      const iy = Math.min(im.size - 1, Math.max(0, Math.floor(vv * im.size)));
+      const q = (iy * im.size + ix) * 4;
+      const w = o.imgW * o.level;
+      const r = v.rgbRand;
+      const acr = p.colorRandom;
+      const ambR = p.tint[0] * (1 - acr) + r[0] * acr;
+      const ambG = p.tint[1] * (1 - acr) + r[1] * acr;
+      const ambB = p.tint[2] * (1 - acr) + r[2] * acr;
+      const [h, sSat, val] = rgbToHsv(
+        ambR + (im.data[q] / 255 - ambR) * w,
+        ambG + (im.data[q + 1] / 255 - ambG) * w,
+        ambB + (im.data[q + 2] / 255 - ambB) * w,
+      );
+      const n = this.wheel.length;
+      const wp = h * n;
+      v.freeTableA = Math.floor(wp) % n;
+      v.freeTableB = (v.freeTableA + 1) % n;
+      v.freeTableFrac = wp - Math.floor(wp);
+      v.freeSat = sSat;
+      bright = 0.35 + 0.65 * val;
+      break;
+    }
     const alive = h2(v.i, g, 303) < p.density ? 1 : 0;
     if (alive) {
       this.spatialize(v.fx, v.fy, v.fz, spat);
       const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
-      v.amp = 0.1 * v.bright * mag * bassBoost(v.freq);
+      v.amp = 0.1 * bright * mag * bassBoost(v.freq);
       v.panL = bassMono(spat[0] / mag, v.freq);
       v.panR = bassMono(spat[1] / mag, v.freq);
     } else {
@@ -494,10 +557,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             if (env > 0.0001) {
               const idx = (captured ? v.capPhase : v.phase) & TABLE_MASK;
               const pure = sine[idx];
-              const tA = this.wheel[captured ? v.capTableA : v.tableA];
-              const tB = this.wheel[captured ? v.capTableB : v.tableB];
-              const tf = captured ? v.capTableFrac : v.tableFrac;
-              const sat = captured ? v.capSat : v.sat;
+              const tA = this.wheel[captured ? v.capTableA : v.freeTableA];
+              const tB = this.wheel[captured ? v.capTableB : v.freeTableB];
+              const tf = captured ? v.capTableFrac : v.freeTableFrac;
+              const sat = captured ? v.capSat : v.freeSat;
               const rich = tA[idx] * (1 - tf) + tB[idx] * tf;
               const osc = pure * (1 - sat) + rich * sat;
               const smp = osc * env * amp;

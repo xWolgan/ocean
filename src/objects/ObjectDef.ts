@@ -36,8 +36,12 @@ export type GeneratorDef =
       width: number;
       /** Depth displacement range in meters. */
       depthRange: number;
-      /** Targets darker than this luminance are culled. */
+      /** Pixels below this alpha become black (invisible) matter. */
       lumaThreshold: number;
+      /** Surface thickness in meters (paper-thin default 0.002). */
+      thickness?: number;
+      /** Exact mathematical plane: no thickness at all. */
+      zeroThickness?: boolean;
     };
 
 /** One tunable property of captured matter: a value and how strongly the

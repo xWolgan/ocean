@@ -13,16 +13,12 @@ export interface TargetCloud {
    *  scatter within it so they FILL the object instead of stacking on
    *  discrete targets. Images set it to their grid-cell; others 0. */
   cell: [number, number, number];
-  /** Non-null for GRIDDED clouds (images): targets are stored in scanline
-   *  order [gridW × gridH]; capture samples a CONTINUOUS (u,v) on the
-   *  rectangle — cell for color, fraction for exact position. The object
-   *  is a canvas, not a point set. */
+  /** Non-null for GRIDDED clouds — retained for compatibility; the image
+   *  path now uses full-resolution property fields instead. */
   grid: [number, number] | null;
+  /** For image property fields: world size [w, h] of the rectangle. */
+  imageSize?: [number, number];
 }
-
-/** Image grid dimensions (gridW × gridH === TARGETS_PER_OBJECT). */
-export const IMAGE_GRID_W = 128;
-export const IMAGE_GRID_H = 64;
 
 /** Deterministic PRNG so a saved scene regenerates identical clouds. */
 function mulberry32(seed: number) {
@@ -161,51 +157,65 @@ export async function buildTargets(gen: GeneratorDef, id: string): Promise<Targe
       setTarget(data, k, cx + x * sx * 0.5, cy + y * sy * 0.5, cz + z * sz * 0.5);
     }
   } else if (gen.kind === 'image') {
-    const img = await loadImageData(gen.src, 256);
-    const depth = gen.depthSrc ? await loadImageData(gen.depthSrc, 256) : null;
-    const [cx, cy, cz] = gen.position;
+    // PROPERTY FIELD: no targets at all. The image lives as a full-
+    // resolution texture (built by ObjectManager); landings are analytic
+    // (u,v on the rectangle). The cloud here is only bounds metadata.
+    const img = await loadImageData(gen.src, 8);
     const aspect = img.height / img.width;
     const w = gen.width;
     const h = w * aspect;
-    // GRIDDED cloud: the image downsampled to IMAGE_GRID_W×H, targets in
-    // scanline order. Capture samples a CONTINUOUS (u,v) on the rectangle
-    // — this cell's color, exact in-cell position — so particles PAINT
-    // the whole surface; the point set does not exist. Transparent /
-    // sub-threshold cells become black (invisible, near-silent) matter.
-    for (let row = 0; row < IMAGE_GRID_H; row++) {
-      for (let col = 0; col < IMAGE_GRID_W; col++) {
-        const k = row * IMAGE_GRID_W + col;
-        const u = (col + 0.5) / IMAGE_GRID_W;
-        const vv = (row + 0.5) / IMAGE_GRID_H;
-        const px = Math.min(img.width - 1, Math.floor(u * img.width));
-        const py = Math.min(img.height - 1, Math.floor(vv * img.height));
-        const p = (py * img.width + px) * 4;
-        const alpha = img.data[p + 3] / 255;
-        const on = alpha >= Math.max(0.05, gen.lumaThreshold) ? 1 : 0;
-        let dz = 0;
-        if (depth) {
-          const dpx = Math.min(depth.width - 1, Math.floor(u * depth.width));
-          const dpy = Math.min(depth.height - 1, Math.floor(vv * depth.height));
-          dz = (depth.data[(dpy * depth.width + dpx) * 4] / 255 - 0.5) * gen.depthRange;
-        }
-        setTarget(
-          data, k,
-          cx + (u - 0.5) * w,
-          cy + (0.5 - vv) * h, // image y-down -> world y-up
-          cz + dz,
-          (img.data[p] / 255) * on,
-          (img.data[p + 1] / 255) * on,
-          (img.data[p + 2] / 255) * on,
-        );
-      }
-    }
-    return finalize(
-      data,
-      [w / IMAGE_GRID_W, h / IMAGE_GRID_H, 0],
-      [IMAGE_GRID_W, IMAGE_GRID_H],
-    );
+    const cloud = finalize(data, [0, 0, 0], null);
+    cloud.center.set(...gen.position);
+    cloud.boundRadius = Math.sqrt((w / 2) ** 2 + (h / 2) ** 2);
+    cloud.imageSize = [w, h];
+    return cloud;
   }
   return finalize(data);
+}
+
+/** Full-resolution pixel field for an image object: GPU copy stretched
+ *  to IMAGE_TEX×IMAGE_TEX (>= 1024 on the long edge; the placement
+ *  rectangle restores the aspect) and a compact copy for the audio twin.
+ *  Sub-threshold-alpha pixels become black (invisible, quiet) matter. */
+export const IMAGE_TEX = 1024;
+export const IMAGE_AUDIO_TEX = 256;
+
+export async function buildImageField(gen: Extract<GeneratorDef, { kind: 'image' }>): Promise<{
+  gpu: Uint8Array;
+  audio: Uint8Array;
+}> {
+  const img = await loadImageDataStretched(gen.src, IMAGE_TEX, IMAGE_TEX);
+  const thresh = Math.max(0.05, gen.lumaThreshold);
+  const gpu = new Uint8Array(IMAGE_TEX * IMAGE_TEX * 4);
+  for (let p = 0; p < IMAGE_TEX * IMAGE_TEX; p++) {
+    const on = img.data[p * 4 + 3] / 255 >= thresh ? 1 : 0;
+    gpu[p * 4] = img.data[p * 4] * on;
+    gpu[p * 4 + 1] = img.data[p * 4 + 1] * on;
+    gpu[p * 4 + 2] = img.data[p * 4 + 2] * on;
+    gpu[p * 4 + 3] = 255;
+  }
+  const small = await loadImageDataStretched(gen.src, IMAGE_AUDIO_TEX, IMAGE_AUDIO_TEX);
+  const audio = new Uint8Array(IMAGE_AUDIO_TEX * IMAGE_AUDIO_TEX * 4);
+  for (let p = 0; p < IMAGE_AUDIO_TEX * IMAGE_AUDIO_TEX; p++) {
+    const on = small.data[p * 4 + 3] / 255 >= thresh ? 1 : 0;
+    audio[p * 4] = small.data[p * 4] * on;
+    audio[p * 4 + 1] = small.data[p * 4 + 1] * on;
+    audio[p * 4 + 2] = small.data[p * 4 + 2] * on;
+    audio[p * 4 + 3] = 255;
+  }
+  return { gpu, audio };
+}
+
+async function loadImageDataStretched(src: string, w: number, h: number): Promise<ImageData> {
+  const img = new Image();
+  img.src = src;
+  await img.decode();
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(img, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h);
 }
 
 async function loadImageData(src: string, maxSize: number): Promise<ImageData> {
