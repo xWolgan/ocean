@@ -1,6 +1,21 @@
 # Setting up Monika's studio (one-time, ~20 minutes)
 
-## English
+## The simplest path (recommended)
+
+1. Install **Claude Code** from https://claude.com/claude-code and sign in.
+2. Make an empty folder, e.g. `Documents\OCEAN`.
+3. Download **one file** into it:
+   https://raw.githubusercontent.com/xWolgan/ocean/main/bootstrap/CLAUDE.md
+   (right-click → save as → make sure it is named exactly `CLAUDE.md`).
+4. Open PowerShell in that folder (in Explorer: type `powershell` in the
+   address bar), run `claude`, and just say **„cześć"**.
+
+Claude reads that file and takes over: installs the tools with her,
+walks her through the GitHub sign-in, pulls the whole project into the
+folder, starts the app, and introduces the project — all step by step,
+in Polish. The manual steps below are only a fallback.
+
+## English (manual fallback)
 
 You'll install four tools once, and after that Claude does everything —
 you will never need to type technical commands yourself.
