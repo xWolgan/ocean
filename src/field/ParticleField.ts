@@ -18,11 +18,13 @@ import {
   step,
   fract,
   floor,
+  cos,
+  sin,
   textureLoad,
 } from 'three/tsl';
 import type { FieldState } from '../state/FieldState';
 import { FIELD_CENTER, FIELD_HALF_EXTENTS } from '../state/FieldState';
-import { TARGETS_PER_OBJECT, IMAGE_TEX } from '../objects/generators';
+import { IMAGE_TEX } from '../objects/generators';
 import { SLOT_COUNT, effectiveThickness, type ObjectManager } from '../objects/ObjectManager';
 
 /**
@@ -211,41 +213,97 @@ export class ParticleField {
       const inReach = step(length(freePos.sub(B.xyz)), B.w);
       const elig = step(roll, A.x).mul(inReach).mul(float(1).sub(taken));
 
-      // fresh random landing EVERY cycle (per-generation). Two object
-      // kinds: SCATTERED constellations (geometry: random target +
-      // jitter) and image PROPERTY FIELDS (analytic rectangle; the SOURCE
-      // PIXEL under the continuous (u,v) dresses the particle).
-      const uRnd = h2(gO, 517 + m * 29);
-      const vRnd = h2(gO, 549 + m * 37);
-      const isImg = step(0.5, H.x);
-      const tIdx = floor(uRnd.mul(TARGETS_PER_OBJECT)).toInt();
-      const posTexel = textureLoad(targetTexture, ivec2(tIdx, m * 2));
-      const colTexel = textureLoad(targetTexture, ivec2(tIdx, m * 2 + 1));
-      const jitScat = vec3(h2(gO, 761 + m * 31), h2(gO, 862 + m * 31), h2(gO, 963 + m * 31))
-        .sub(0.5)
-        .mul(2)
-        .mul(G.yzw);
-      const posScat = posTexel.xyz.add(jitScat);
-      // analytic rectangle landing (paper-thin z within the thickness)
+      // fresh random landing EVERY cycle (per-generation), computed
+      // ANALYTICALLY per shape kind — no stored point sets anywhere.
+      // Curves interpolate a dense arc-length table (steps << particle
+      // size); images sample their source pixels.
+      const r1 = h2(gO, 517 + m * 29);
+      const r2 = h2(gO, 549 + m * 37);
+      const r3 = h2(gO, 761 + m * 31);
+      const r4 = h2(gO, 862 + m * 31);
+      const r5 = h2(gO, 963 + m * 31);
+      const r6 = h2(gO, 1063 + m * 41);
+      const kind = H.x;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const eqK = (k: number): any =>
+        step(k - 0.5, kind).mul(step(kind, k + 0.5));
+
+      // 1: image property field (analytic rectangle, paper-thin z)
       const posImg = vec3(
-        B.x.add(uRnd.sub(0.5).mul(H.y.mul(2))),
-        B.y.add(float(0.5).sub(vRnd).mul(H.z.mul(2))),
-        B.z.add(h2(gO, 963 + m * 31).sub(0.5).mul(H.w)),
+        B.x.add(r1.sub(0.5).mul(H.y.mul(2))),
+        B.y.add(float(0.5).sub(r2).mul(H.z.mul(2))),
+        B.z.add(r5.sub(0.5).mul(H.w)),
       );
       const imgTexel = textureLoad(
         imageTextures[m],
-        ivec2(
-          floor(uRnd.mul(IMAGE_TEX - 1)).toInt(),
-          floor(vRnd.mul(IMAGE_TEX - 1)).toInt(),
-        ),
+        ivec2(floor(r1.mul(IMAGE_TEX - 1)).toInt(), floor(r2.mul(IMAGE_TEX - 1)).toInt()),
       );
+      // 2: point (triangular ~gaussian around the center, sigma = H.y)
+      const posPoint = B.xyz.add(
+        vec3(r1.add(r4).sub(1), r2.add(r5).sub(1), r3.add(r6).sub(1)).mul(H.y.mul(1.2)),
+      );
+      // 3/4: sphere surface / volume (radius H.y)
+      const su = r1.mul(2).sub(1);
+      const sphi = r2.mul(2 * Math.PI);
+      const ss = float(1).sub(su.mul(su)).max(0).sqrt();
+      const srad = H.y.mul(mix(float(1), pow(r3, 1 / 3), eqK(4)));
+      const posSph = B.xyz.add(vec3(ss.mul(cos(sphi)), su, ss.mul(sin(sphi))).mul(srad));
+      // 5: box surface (halves H.yzw)
+      const bf = floor(r5.mul(5.9999));
+      const bax = floor(bf.div(2));
+      const bsgn = float(1).sub(bf.sub(bax.mul(2)).mul(2));
+      const ba = r1.mul(2).sub(1);
+      const bb = r2.mul(2).sub(1);
+      const eqA = (k: number) => step(k - 0.5, bax).mul(step(bax, k + 0.5));
+      const posBoxS = B.xyz.add(
+        vec3(bsgn, ba, bb)
+          .mul(eqA(0))
+          .add(vec3(ba, bsgn, bb).mul(eqA(1)))
+          .add(vec3(ba, bb, bsgn).mul(eqA(2)))
+          .mul(vec3(H.y, H.z, H.w)),
+      );
+      // 6: box volume
+      const posBoxV = B.xyz.add(
+        vec3(r1, r2, r3).sub(0.5).mul(2).mul(vec3(H.y, H.z, H.w)),
+      );
+      // 7/8: cylinder surface / volume (radius H.y, half-height H.z)
+      const cphi = r1.mul(2 * Math.PI);
+      const crr = H.y.mul(mix(float(1), r3.sqrt(), eqK(8)));
+      const posCyl = B.xyz.add(
+        vec3(cos(cphi).mul(crr), r2.sub(0.5).mul(2).mul(H.z), sin(cphi).mul(crr)),
+      );
+      // 9/10: curve — interpolated arc-length table (+ thickness jitter);
+      // 10 fills the closed curve toward its centroid
+      const tt = r1.mul(H.z.sub(1.0001).max(1));
+      const ci0 = floor(tt);
+      const cfr = tt.sub(ci0);
+      const cp0 = textureLoad(targetTexture, ivec2(ci0.toInt(), m * 2)).xyz;
+      const cp1 = textureLoad(targetTexture, ivec2(ci0.add(1).toInt(), m * 2)).xyz;
+      const pcv = mix(cp0, cp1, cfr).add(
+        vec3(r3, r4, r5).sub(0.5).mul(2).mul(H.y),
+      );
+      const posCurve = mix(
+        pcv,
+        B.xyz.add(pcv.sub(B.xyz).mul(r2.sqrt())),
+        eqK(10),
+      );
+
+      const posCand = posImg
+        .mul(eqK(1))
+        .add(posPoint.mul(eqK(2)))
+        .add(posSph.mul(eqK(3).add(eqK(4))))
+        .add(posBoxS.mul(eqK(5)))
+        .add(posBoxV.mul(eqK(6)))
+        .add(posCyl.mul(eqK(7).add(eqK(8))))
+        .add(posCurve.mul(eqK(9).add(eqK(10))));
+      const isImg = eqK(1);
 
       taken = taken.add(elig);
       capXO = mix(capXO, xO, elig);
       capTau = mix(capTau, tau, elig);
-      capPos = mix(capPos, mix(posScat, posImg, isImg), elig);
-      capTexCol = mix(capTexCol, mix(colTexel.xyz, imgTexel.xyz, isImg), elig);
-      capHasCol = mix(capHasCol, mix(colTexel.w, float(1), isImg), elig);
+      capPos = mix(capPos, posCand, elig);
+      capTexCol = mix(capTexCol, imgTexel.xyz.mul(isImg), elig);
+      capHasCol = mix(capHasCol, isImg, elig);
       capLevel = mix(capLevel, A.w, elig);
       capSizeEff = mix(capSizeEff, mix(this.uSize, C.y, C.z), elig);
       capTint = mix(capTint, D.xyz, elig);
@@ -275,7 +333,7 @@ export class ParticleField {
       const G = vec4(this.uObjG.element(m) as any);
       const H = vec4(this.uObjH.element(m) as any);
       /* eslint-enable @typescript-eslint/no-explicit-any */
-      const isImg = step(0.5, H.x);
+      const isImg = step(0.5, H.x).mul(step(H.x, 1.5));
       const inX = step(freePos.x.sub(B.x).abs(), H.y);
       const inY = step(freePos.y.sub(B.y).abs(), H.z);
       const inZ = step(freePos.z.sub(B.z).abs(), H.w.mul(0.5));
@@ -453,12 +511,10 @@ export class ParticleField {
         Math.max(inst.def.spatialSmear, cell[2] / 2),
       );
       const size = inst.cloud.imageSize;
-      H[m].set(
-        size ? 1 : 0,
-        size ? size[0] / 2 : 0,
-        size ? size[1] / 2 : 0,
-        effectiveThickness(inst.def),
-      );
+      const shape = inst.cloud.shape;
+      if (size) H[m].set(1, size[0] / 2, size[1] / 2, effectiveThickness(inst.def));
+      else if (shape) H[m].set(shape.kind, shape.a, shape.b, shape.c);
+      else H[m].set(0, 0, 0, 0);
     }
   }
 

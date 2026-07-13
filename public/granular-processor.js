@@ -322,45 +322,87 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     v.asgInvTau = 1 / o.tau;
     v.asgPhi = v.phi * (1 - o.sync);
     v.capPhase = 0;
-    if (!cloud && !(o.isImage > 0)) {
+    if (!cloud && (o.kind === 9 || o.kind === 10)) {
       v.capOn = 0;
       return;
     }
     v.capOn = 1;
-    // fresh random landing this cycle — same hashes as the GPU; image
-    // property fields land analytically on the rectangle and take the
-    // SOURCE PIXEL under the continuous (u,v)
-    const uRnd = h2(v.i, gPick, 517 + pick * 29);
-    let px;
-    let py;
-    let pz;
-    let rawR;
+    // fresh random landing this cycle — ANALYTIC per shape kind, same
+    // hashes as the GPU (bit-exact twins). No stored point sets.
+    const r1 = h2(v.i, gPick, 517 + pick * 29);
+    const r2 = h2(v.i, gPick, 549 + pick * 37);
+    const r3 = h2(v.i, gPick, 761 + pick * 31);
+    const r4 = h2(v.i, gPick, 862 + pick * 31);
+    const r5 = h2(v.i, gPick, 963 + pick * 31);
+    const r6 = h2(v.i, gPick, 1063 + pick * 41);
+    let px = o.centerX;
+    let py = o.centerY;
+    let pz = o.centerZ;
+    let rawR = -1;
     let rawG = 0;
     let rawB = 0;
-    if (o.isImage > 0) {
-      const vRnd = h2(v.i, gPick, 549 + pick * 37);
-      px = o.centerX + (uRnd - 0.5) * o.halfW * 2;
-      py = o.centerY + (0.5 - vRnd) * o.halfH * 2;
-      pz = o.centerZ + (h2(v.i, gPick, 963 + pick * 31) - 0.5) * o.thickness;
+    const k = o.kind;
+    if (k === 1) {
+      px = o.centerX + (r1 - 0.5) * o.pa * 2;
+      py = o.centerY + (0.5 - r2) * o.pb * 2;
+      pz = o.centerZ + (r5 - 0.5) * o.pc;
       const im = this.audioImages[pick];
       if (im) {
-        const ix = Math.min(im.size - 1, Math.floor(uRnd * im.size));
-        const iy = Math.min(im.size - 1, Math.floor(vRnd * im.size));
+        const ix = Math.min(im.size - 1, Math.floor(r1 * im.size));
+        const iy = Math.min(im.size - 1, Math.floor(r2 * im.size));
         const q = (iy * im.size + ix) * 4;
         rawR = im.data[q] / 255;
         rawG = im.data[q + 1] / 255;
         rawB = im.data[q + 2] / 255;
-      } else {
-        rawR = -1;
       }
-    } else {
-      const ti = Math.floor(uRnd * (cloud.length / 6));
-      px = cloud[ti * 6];
-      py = cloud[ti * 6 + 1];
-      pz = cloud[ti * 6 + 2];
-      rawR = cloud[ti * 6 + 3];
-      rawG = cloud[ti * 6 + 4];
-      rawB = cloud[ti * 6 + 5];
+    } else if (k === 2) {
+      px += (r1 + r4 - 1) * o.pa * 1.2;
+      py += (r2 + r5 - 1) * o.pa * 1.2;
+      pz += (r3 + r6 - 1) * o.pa * 1.2;
+    } else if (k === 3 || k === 4) {
+      const su = r1 * 2 - 1;
+      const sphi = r2 * 2 * Math.PI;
+      const ss = Math.sqrt(Math.max(0, 1 - su * su));
+      const rad = o.pa * (k === 4 ? Math.pow(r3, 1 / 3) : 1);
+      px += ss * Math.cos(sphi) * rad;
+      py += su * rad;
+      pz += ss * Math.sin(sphi) * rad;
+    } else if (k === 5) {
+      const bf = Math.floor(r5 * 5.9999);
+      const bax = Math.floor(bf / 2);
+      const bsgn = 1 - (bf % 2) * 2;
+      const ba = r1 * 2 - 1;
+      const bb = r2 * 2 - 1;
+      const c = bax === 0 ? [bsgn, ba, bb] : bax === 1 ? [ba, bsgn, bb] : [ba, bb, bsgn];
+      px += c[0] * o.pa;
+      py += c[1] * o.pb;
+      pz += c[2] * o.pc;
+    } else if (k === 6) {
+      px += (r1 - 0.5) * 2 * o.pa;
+      py += (r2 - 0.5) * 2 * o.pb;
+      pz += (r3 - 0.5) * 2 * o.pc;
+    } else if (k === 7 || k === 8) {
+      const cphi = r1 * 2 * Math.PI;
+      const crr = o.pa * (k === 8 ? Math.sqrt(r3) : 1);
+      px += Math.cos(cphi) * crr;
+      py += (r2 - 0.5) * 2 * o.pb;
+      pz += Math.sin(cphi) * crr;
+    } else if ((k === 9 || k === 10) && cloud) {
+      const tt = r1 * Math.max(1, o.pb - 1.0001);
+      const i0 = Math.floor(tt);
+      const fr = tt - i0;
+      const bx = cloud[i0 * 6] * (1 - fr) + cloud[(i0 + 1) * 6] * fr;
+      const by = cloud[i0 * 6 + 1] * (1 - fr) + cloud[(i0 + 1) * 6 + 1] * fr;
+      const bz = cloud[i0 * 6 + 2] * (1 - fr) + cloud[(i0 + 1) * 6 + 2] * fr;
+      px = bx + (r3 - 0.5) * 2 * o.pa;
+      py = by + (r4 - 0.5) * 2 * o.pa;
+      pz = bz + (r5 - 0.5) * 2 * o.pa;
+      if (k === 10) {
+        const f = Math.sqrt(r2);
+        px = o.centerX + (px - o.centerX) * f;
+        py = o.centerY + (py - o.centerY) * f;
+        pz = o.centerZ + (pz - o.centerZ) * f;
+      }
     }
     this.spatialize(px, py, pz, spat);
 
@@ -423,14 +465,14 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     let bright = v.bright;
     for (let m = 0; m < p.objects.length; m++) {
       const o = p.objects[m];
-      if (!o || !(o.isImage > 0) || o.level <= 0.001) continue;
-      if (Math.abs(v.fx - o.centerX) > o.halfW) continue;
-      if (Math.abs(v.fy - o.centerY) > o.halfH) continue;
-      if (Math.abs(v.fz - o.centerZ) > o.thickness * 0.5) continue;
+      if (!o || o.kind !== 1 || o.level <= 0.001) continue;
+      if (Math.abs(v.fx - o.centerX) > o.pa) continue;
+      if (Math.abs(v.fy - o.centerY) > o.pb) continue;
+      if (Math.abs(v.fz - o.centerZ) > o.pc * 0.5) continue;
       const im = this.audioImages[m];
       if (!im) break;
-      const u = (v.fx - o.centerX) / (o.halfW * 2) + 0.5;
-      const vv = 0.5 - (v.fy - o.centerY) / (o.halfH * 2);
+      const u = (v.fx - o.centerX) / (o.pa * 2) + 0.5;
+      const vv = 0.5 - (v.fy - o.centerY) / (o.pb * 2);
       const ix = Math.min(im.size - 1, Math.max(0, Math.floor(u * im.size)));
       const iy = Math.min(im.size - 1, Math.max(0, Math.floor(vv * im.size)));
       const q = (iy * im.size + ix) * 4;

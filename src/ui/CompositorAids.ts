@@ -19,6 +19,11 @@ export class CompositorAids {
   private readonly dropLine: THREE.Line;
   private readonly floorRing: THREE.Mesh;
   private readonly markers: THREE.Mesh[] = [];
+  private readonly previewSphere: THREE.Mesh;
+  private readonly previewBox: THREE.Mesh;
+  private readonly previewRect: THREE.LineLoop;
+  private readonly previewLine: THREE.Line;
+  private readonly previewLinePositions: THREE.BufferAttribute;
 
   constructor() {
     this.grid = new THREE.GridHelper(6, 12, 0x335566, 0x152535);
@@ -51,6 +56,37 @@ export class CompositorAids {
     this.floorRing.rotation.x = -Math.PI / 2;
     this.group.add(this.floorRing);
 
+    const previewMat = new THREE.MeshBasicMaterial({
+      color: 0x77ddff,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.5,
+    });
+    this.previewSphere = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 12), previewMat);
+    this.previewBox = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), previewMat.clone());
+    const rectPts = [
+      new THREE.Vector3(-1, -1, 0),
+      new THREE.Vector3(1, -1, 0),
+      new THREE.Vector3(1, 1, 0),
+      new THREE.Vector3(-1, 1, 0),
+    ];
+    this.previewRect = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints(rectPts),
+      new THREE.LineBasicMaterial({ color: 0x77ddff, transparent: true, opacity: 0.7 }),
+    );
+    this.previewLinePositions = new THREE.BufferAttribute(new Float32Array(512 * 3), 3);
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute('position', this.previewLinePositions);
+    lineGeo.setDrawRange(0, 0);
+    this.previewLine = new THREE.Line(
+      lineGeo,
+      new THREE.LineBasicMaterial({ color: 0xffcc66, transparent: true, opacity: 0.9 }),
+    );
+    for (const o of [this.previewSphere, this.previewBox, this.previewRect, this.previewLine]) {
+      o.visible = false;
+      this.group.add(o);
+    }
+
     for (let m = 0; m < SLOT_COUNT; m++) {
       const marker = new THREE.Mesh(
         new THREE.SphereGeometry(0.06, 10, 8),
@@ -79,6 +115,30 @@ export class CompositorAids {
       pts.setXYZ(0, c.x, 0, c.z);
       pts.setXYZ(1, c.x, c.y, c.z);
       pts.needsUpdate = true;
+    }
+
+    // live authoring preview: see what you are making before you release
+    const pv = interaction.preview;
+    this.previewSphere.visible = pv?.kind === 'sphere' || pv?.kind === 'point';
+    this.previewBox.visible = pv?.kind === 'box';
+    this.previewRect.visible = pv?.kind === 'image';
+    this.previewLine.visible = pv?.kind === 'curve';
+    if (pv && (pv.kind === 'sphere' || pv.kind === 'point')) {
+      this.previewSphere.position.copy(pv.center);
+      this.previewSphere.scale.setScalar(pv.radius);
+    } else if (pv && pv.kind === 'box') {
+      this.previewBox.position.copy(pv.center);
+      this.previewBox.scale.setScalar(pv.radius);
+    } else if (pv && pv.kind === 'image') {
+      this.previewRect.position.copy(pv.center);
+      this.previewRect.scale.set(pv.halfW, pv.halfH, 1);
+    } else if (pv && pv.kind === 'curve') {
+      const n = Math.min(512, pv.points.length);
+      for (let i = 0; i < n; i++) {
+        this.previewLinePositions.setXYZ(i, pv.points[i][0], pv.points[i][1], pv.points[i][2]);
+      }
+      this.previewLinePositions.needsUpdate = true;
+      this.previewLine.geometry.setDrawRange(0, n);
     }
 
     for (let m = 0; m < SLOT_COUNT; m++) {

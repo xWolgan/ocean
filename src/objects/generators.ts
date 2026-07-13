@@ -18,6 +18,10 @@ export interface TargetCloud {
   grid: [number, number] | null;
   /** For image property fields: world size [w, h] of the rectangle. */
   imageSize?: [number, number];
+  /** Analytic shape descriptor: landings are computed exactly in both
+   *  renderers — no stored point set. kind: 2=point 3=sphereS 4=sphereV
+   *  5=boxS 6=boxV 7=cylS 8=cylV 9=curve(table) 10=curveFill(table). */
+  shape?: { kind: number; a: number; b: number; c: number };
 }
 
 /** Deterministic PRNG so a saved scene regenerates identical clouds. */
@@ -82,15 +86,14 @@ function setTarget(
 export async function buildTargets(gen: GeneratorDef, id: string): Promise<TargetCloud> {
   const K = TARGETS_PER_OBJECT;
   const data = new Float32Array(K * 6);
-  const rand = mulberry32(seedFromId(id));
+  void mulberry32(seedFromId(id)); // seeded RNG retained for future generators
 
   if (gen.kind === 'point') {
-    const [x, y, z] = gen.position;
-    for (let k = 0; k < K; k++) {
-      // gaussian-ish via sum of uniforms
-      const g3 = () => (rand() + rand() + rand()) / 1.5 - 1;
-      setTarget(data, k, x + g3() * gen.sigma, y + g3() * gen.sigma, z + g3() * gen.sigma);
-    }
+    const cloud = finalize(data);
+    cloud.center.set(...gen.position);
+    cloud.boundRadius = gen.sigma * 2.5;
+    cloud.shape = { kind: 2, a: gen.sigma, b: 0, c: 0 };
+    return cloud;
   } else if (gen.kind === 'curve') {
     const pts = gen.points.map((p) => new THREE.Vector3(...p));
     if (pts.length < 2) {
@@ -98,64 +101,37 @@ export async function buildTargets(gen: GeneratorDef, id: string): Promise<Targe
       return finalize(data);
     }
     const curve = new THREE.CatmullRomCurve3(pts, gen.closed, 'centripetal');
-    const centroid = pts.reduce((a, p) => a.add(p), new THREE.Vector3()).divideScalar(pts.length);
-    const v = new THREE.Vector3();
+    // dense even-arc-length table; landings interpolate between entries,
+    // so the curve is effectively continuous (steps far below particle size)
+    const samples = curve.getSpacedPoints(K - 1);
     for (let k = 0; k < K; k++) {
-      curve.getPointAt(rand(), v);
-      if (gen.closed && gen.fillSurface) {
-        // interior of a closed curve: shrink toward the centroid (area-uniform
-        // for star-shaped curves — honest enough for a constellation)
-        v.lerp(centroid, 1 - Math.sqrt(rand()));
-      }
-      const t = gen.thickness;
-      setTarget(
-        data, k,
-        v.x + (rand() - 0.5) * t,
-        v.y + (rand() - 0.5) * t,
-        v.z + (rand() - 0.5) * t,
-      );
+      const v = samples[Math.min(k, samples.length - 1)];
+      setTarget(data, k, v.x, v.y, v.z);
     }
+    const cloud = finalize(data);
+    cloud.shape = {
+      kind: gen.closed && gen.fillSurface ? 10 : 9,
+      a: gen.thickness / 2,
+      b: K,
+      c: 0,
+    };
+    return cloud;
   } else if (gen.kind === 'primitive') {
-    const [cx, cy, cz] = gen.position;
+    const cloud = finalize(data);
+    cloud.center.set(...gen.position);
     const [sx, sy, sz] = gen.size;
-    for (let k = 0; k < K; k++) {
-      let x = 0;
-      let y = 0;
-      let z = 0;
-      if (gen.shape === 'sphere') {
-        // uniform direction
-        const u = rand() * 2 - 1;
-        const phi = rand() * Math.PI * 2;
-        const s = Math.sqrt(1 - u * u);
-        const rr = gen.mode === 'volume' ? Math.cbrt(rand()) : 1;
-        x = s * Math.cos(phi) * rr;
-        y = u * rr;
-        z = s * Math.sin(phi) * rr;
-      } else if (gen.shape === 'box') {
-        if (gen.mode === 'volume') {
-          x = rand() * 2 - 1;
-          y = rand() * 2 - 1;
-          z = rand() * 2 - 1;
-        } else {
-          // pick a face, uniform on it (equal size assumed good enough)
-          const f = Math.floor(rand() * 6);
-          const a = rand() * 2 - 1;
-          const bb = rand() * 2 - 1;
-          const s = f % 2 === 0 ? 1 : -1;
-          if (f < 2) [x, y, z] = [s, a, bb];
-          else if (f < 4) [x, y, z] = [a, s, bb];
-          else [x, y, z] = [a, bb, s];
-        }
-      } else {
-        // cylinder along y
-        const phi = rand() * Math.PI * 2;
-        const rr = gen.mode === 'volume' ? Math.sqrt(rand()) : 1;
-        x = Math.cos(phi) * rr;
-        z = Math.sin(phi) * rr;
-        y = rand() * 2 - 1;
-      }
-      setTarget(data, k, cx + x * sx * 0.5, cy + y * sy * 0.5, cz + z * sz * 0.5);
+    const vol = gen.mode === 'volume';
+    if (gen.shape === 'sphere') {
+      cloud.shape = { kind: vol ? 4 : 3, a: sx / 2, b: 0, c: 0 };
+      cloud.boundRadius = sx / 2;
+    } else if (gen.shape === 'box') {
+      cloud.shape = { kind: vol ? 6 : 5, a: sx / 2, b: sy / 2, c: sz / 2 };
+      cloud.boundRadius = Math.sqrt(sx * sx + sy * sy + sz * sz) / 2;
+    } else {
+      cloud.shape = { kind: vol ? 8 : 7, a: sx / 2, b: sy / 2, c: 0 };
+      cloud.boundRadius = Math.sqrt((sx / 2) ** 2 + (sy / 2) ** 2);
     }
+    return cloud;
   } else if (gen.kind === 'image') {
     // PROPERTY FIELD: no targets at all. The image lives as a full-
     // resolution texture (built by ObjectManager); landings are analytic

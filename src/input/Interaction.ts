@@ -18,9 +18,16 @@ export class Interaction {
   /** Height of the horizontal placement plane. */
   planeHeight = 1.5;
   /** Pending image (data URLs) armed by the panel's file input. */
-  pendingImage: { src: string; depthSrc?: string } | null = null;
+  pendingImage: { src: string; depthSrc?: string; aspect?: number } | null = null;
   /** Current pointer position on the placement plane (null = off-plane). */
   cursorPos: THREE.Vector3 | null = null;
+  /** Live authoring preview for the aids layer. */
+  preview:
+    | { kind: 'sphere' | 'box'; center: THREE.Vector3; radius: number }
+    | { kind: 'point'; center: THREE.Vector3; radius: number }
+    | { kind: 'image'; center: THREE.Vector3; halfW: number; halfH: number }
+    | { kind: 'curve'; points: [number, number, number][] }
+    | null = null;
 
   private readonly touch: Source;
   private readonly cursorScratch = new THREE.Vector3();
@@ -32,6 +39,8 @@ export class Interaction {
   private pressing = false;
   private envelope = 0;
   private stroke: [number, number, number][] | null = null;
+  private dragStart: THREE.Vector3 | null = null;
+  private dragRadius = 0;
 
   constructor(
     camera: THREE.PerspectiveCamera,
@@ -97,6 +106,28 @@ export class Interaction {
         if (dx * dx + dz * dz > 0.08 * 0.08) this.stroke.push([p.x, p.y, p.z]);
       }
     }
+    if (this.dragStart && this.cursorPos) {
+      this.dragRadius = Math.max(0.1, this.dragStart.distanceTo(this.cursorPos));
+    }
+    this.updatePreview();
+  }
+
+  /** What the aids layer should show right now. */
+  private updatePreview(): void {
+    if (this.stroke) {
+      this.preview = { kind: 'curve', points: this.stroke };
+    } else if (this.dragStart && (this.mode === 'sphere' || this.mode === 'box')) {
+      this.preview = { kind: this.mode, center: this.dragStart, radius: this.dragRadius };
+    } else if (this.cursorPos && (this.mode === 'sphere' || this.mode === 'box')) {
+      this.preview = { kind: this.mode, center: this.cursorPos, radius: 0.5 };
+    } else if (this.cursorPos && this.mode === 'point') {
+      this.preview = { kind: 'point', center: this.cursorPos, radius: 0.15 };
+    } else if (this.cursorPos && this.mode === 'image' && this.pendingImage) {
+      const aspect = this.pendingImage.aspect ?? 1;
+      this.preview = { kind: 'image', center: this.cursorPos, halfW: 1, halfH: aspect };
+    } else {
+      this.preview = null;
+    }
   }
 
   private onAuthorDown(): void {
@@ -109,12 +140,14 @@ export class Interaction {
       this.stroke = [pos];
       return;
     }
+    if (this.mode === 'sphere' || this.mode === 'box') {
+      // press places the center; dragging sizes it; release commits
+      this.dragStart = new THREE.Vector3(...pos);
+      this.dragRadius = 0.5;
+      return;
+    }
     let gen: GeneratorDef | null = null;
     if (this.mode === 'point') gen = { kind: 'point', position: pos, sigma: 0.15 };
-    else if (this.mode === 'sphere')
-      gen = { kind: 'primitive', shape: 'sphere', mode: 'surface', position: pos, size: [1, 1, 1] };
-    else if (this.mode === 'box')
-      gen = { kind: 'primitive', shape: 'box', mode: 'surface', position: pos, size: [1, 1, 1] };
     else if (this.mode === 'image' && this.pendingImage)
       gen = {
         kind: 'image',
@@ -132,6 +165,21 @@ export class Interaction {
   }
 
   private onAuthorUp(): void {
+    if (this.dragStart) {
+      const d = Math.max(0.15, this.dragRadius);
+      const gen: GeneratorDef = {
+        kind: 'primitive',
+        shape: this.mode === 'box' ? 'box' : 'sphere',
+        mode: 'surface',
+        position: [this.dragStart.x, this.dragStart.y, this.dragStart.z],
+        size: [d * 2, d * 2, d * 2],
+      };
+      this.dragStart = null;
+      this.preview = null;
+      void this.objects.add(createObjectDef(gen)).then(() => this.onObjectsChanged());
+      this.mode = 'play';
+      return;
+    }
     if (!this.stroke) return;
     if (this.stroke.length >= 2) {
       const gen: GeneratorDef = {
@@ -144,6 +192,7 @@ export class Interaction {
       void this.objects.add(createObjectDef(gen)).then(() => this.onObjectsChanged());
     }
     this.stroke = null;
+    this.preview = null;
     this.mode = 'play';
   }
 

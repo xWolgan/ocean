@@ -65,8 +65,15 @@ export function createPanel(
             if (!f) return;
             const reader = new FileReader();
             reader.onload = () => {
-              interaction.pendingImage = { src: reader.result as string };
+              const src = reader.result as string;
+              interaction.pendingImage = { src };
               interaction.mode = 'image';
+              const probe = new Image();
+              probe.onload = () => {
+                if (interaction.pendingImage?.src === src)
+                  interaction.pendingImage.aspect = probe.height / probe.width;
+              };
+              probe.src = src;
             };
             reader.readAsDataURL(f);
           };

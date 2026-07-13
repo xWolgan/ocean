@@ -20,8 +20,8 @@ compute the SAME function from the same PCG hashes on a shared clock.
 same formulas, same hash salts (101/202/331 free position, 303 density
 lottery, 222/111 burst shape, 404 size, 601-603 color, 808 slot period,
 909 phase; per object slot m, per object-generation g: 431+m*17 capture
-lottery, 517+m*29 target/u, 549+m*37 v (gridded canvases),
-761/862/963+m*31 scatter jitter), same
+lottery, 517+m*29 u, 549+m*37 v, 761/862/963+m*31 and 1063+m*41
+analytic-landing randoms), same
 envelope math, same tau/octave scaling. `pcgHash` in
 ParticleField.ts is the bit-exact JS replica of TSL's `hash()` — never
 let them diverge. If you change one side and not the other, image and

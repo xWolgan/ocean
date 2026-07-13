@@ -102,8 +102,12 @@ An object = **constellation** (8192 targets, optional per-target colors)
   attraction 0, ambient matter inside the slab takes the image's pixel
   properties (verified). Audio twin uses a compact 256x256 copy
   (deliberate sub-perceptual divergence). Depth maps temporarily inert
-  (return with the analytic-geometry pass). Geometry objects still use
-  scattered constellations — analytic unification agreed as next step.
+  (return with the analytic-geometry pass). Geometry is ANALYTIC: points
+  (gaussian), spheres/boxes/cylinders (exact surface/volume sampling in
+  both renderers — no stored points, infinite resolution); drawn curves
+  use a dense even-arc-length table (8192 entries) with interpolation —
+  steps far below particle size. Landing salts: 517/549/761/862/963/1063
+  + per-slot offsets (registry in CLAUDE.md).
 - Each object has its OWN clock: tau_obj = lifespanToTau(patch.lifespan)
   / 2^octave. Objects therefore form chords with each other.
 - sync (0–1): blends private phases toward unison — textured cloud ↔

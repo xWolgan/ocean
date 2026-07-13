@@ -39,10 +39,10 @@ export interface AudioObjectDescriptor {
   tintB: number;
   tintW: number; // tintWeight · level
   imgW: number; // imageColor weight
-  isImage: number; // 1 = image property field (analytic rectangle)
-  halfW: number;
-  halfH: number;
-  thickness: number;
+  kind: number; // 1=image 2=point 3/4=sphere 5/6=box 7/8=cyl 9/10=curve
+  pa: number; // shape params (image: halfW/halfH/thickness)
+  pb: number;
+  pc: number;
   crV: number; // colorRandom value / weight
   crW: number;
   srV: number; // sizeRandom value / weight
@@ -177,7 +177,7 @@ export class ObjectManager {
         return { level: 0, claim: 0, tau: 0.02, sync: 1, registerHz: 800,
                  centerX: 0, centerY: 0, centerZ: 0, reach: 0, gain: 1,
                  tintR: 1, tintG: 1, tintB: 1, tintW: 0, imgW: 1,
-                 isImage: 0, halfW: 0, halfH: 0, thickness: 0,
+                 kind: 0, pa: 0, pb: 0, pc: 0,
                  crV: 0, crW: 0, srV: 0.5, srW: 0, smearV: 0.5, smearW: 0,
                  asymV: 0, asymW: 0 };
       }
@@ -202,10 +202,10 @@ export class ObjectManager {
         tintB: p.tintB,
         tintW: p.tintWeight * inst.level,
         imgW: p.imageColor,
-        isImage: inst.def.generator.kind === 'image' ? 1 : 0,
-        halfW: inst.cloud.imageSize ? inst.cloud.imageSize[0] / 2 : 0,
-        halfH: inst.cloud.imageSize ? inst.cloud.imageSize[1] / 2 : 0,
-        thickness: effectiveThickness(inst.def),
+        kind: inst.cloud.imageSize ? 1 : inst.cloud.shape ? inst.cloud.shape.kind : 0,
+        pa: inst.cloud.imageSize ? inst.cloud.imageSize[0] / 2 : inst.cloud.shape?.a ?? 0,
+        pb: inst.cloud.imageSize ? inst.cloud.imageSize[1] / 2 : inst.cloud.shape?.b ?? 0,
+        pc: inst.cloud.imageSize ? effectiveThickness(inst.def) : inst.cloud.shape?.c ?? 0,
         crV: p.colorRandom.value,
         crW: p.colorRandom.weight * inst.level,
         srV: p.sizeRandom.value,
