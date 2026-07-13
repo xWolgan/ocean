@@ -28,7 +28,8 @@ export interface AudioObjectDescriptor {
   claim: number;
   tau: number;
   sync: number;
-  registerHz: number;
+  scaleBlend: number; // timbre-wheel base (ambient blended with patch)
+  pitchMul: number; // 2^octave — transposes the hue-derived pitch
   centerX: number;
   centerY: number;
   centerZ: number;
@@ -171,10 +172,10 @@ export class ObjectManager {
     }
   }
 
-  audioDescriptors(ambientRegisterHz: number): AudioObjectDescriptor[] {
+  audioDescriptors(ambientScale: number): AudioObjectDescriptor[] {
     return this.slots.map((inst) => {
       if (!inst || !inst.cloud || inst.level <= 0.001) {
-        return { level: 0, claim: 0, tau: 0.02, sync: 1, registerHz: 800,
+        return { level: 0, claim: 0, tau: 0.02, sync: 1, scaleBlend: 0.5, pitchMul: 1,
                  centerX: 0, centerY: 0, centerZ: 0, reach: 0, gain: 1,
                  tintR: 1, tintG: 1, tintB: 1, tintW: 0, imgW: 1,
                  kind: 0, pa: 0, pb: 0, pc: 0,
@@ -183,15 +184,15 @@ export class ObjectManager {
       }
       const p = inst.def.patch;
       const octUp = Math.pow(2, p.octave);
-      const objRegister = 180 * Math.pow(20, 1 - p.scale.value) * octUp;
       return {
         level: inst.level,
         claim: inst.def.claim,
         // the octave stretches the whole timebase: lower = slower
         tau: lifespanToTau(p.lifespan.value) / octUp,
         sync: p.sync,
-        registerHz:
-          ambientRegisterHz + (objRegister - ambientRegisterHz) * p.scale.weight,
+        scaleBlend:
+          ambientScale + (p.scale.value - ambientScale) * p.scale.weight,
+        pitchMul: octUp,
         centerX: inst.cloud.center.x,
         centerY: inst.cloud.center.y,
         centerZ: inst.cloud.center.z,

@@ -71,7 +71,7 @@ export class AudioEngine {
     camera.getWorldPosition(_listener);
     _right.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
 
-    const ambientRegisterHz = 180 * Math.pow(20, 1 - state.scale);
+
 
     // ship full constellations only when they change; the worklet samples
     // per-generation targets itself with the same hashes as the GPU
@@ -94,7 +94,7 @@ export class AudioEngine {
       data: {
         tau: lifespanToTau(state.lifespan),
         density: state.density,
-        registerHz: ambientRegisterHz,
+        scale: state.scale,
         colorRandom: state.colorRandom,
         sizeRandom: state.sizeRandom,
         smear: state.smear,
@@ -118,7 +118,7 @@ export class AudioEngine {
           FIELD_HALF_EXTENTS.z * 2,
         ],
         stride,
-        objects: objects.audioDescriptors(ambientRegisterHz),
+        objects: objects.audioDescriptors(state.scale),
       },
     });
   }

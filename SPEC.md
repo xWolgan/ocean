@@ -59,7 +59,7 @@ shimmer.
 | Parameter | Range (default) | Meaning / mapping |
 |---|---|---|
 | density | 0–1 (0.55) | fraction of particles that exist; audio grain rate |
-| scale | 0–1 (0.4) | register: pitch 180·20^(1−scale) Hz center (big = low); sprite size 0.006+0.045·scale m |
+| scale | 0–1 (0.4) | timbre: base position on the wheel; sprite size 0.006+0.045·scale m |
 | lifespan | 0–1 (0.7) | flash/grain duration 1–100 ms; also object pulse pitch base |
 | smear | 0–1 (0.5) | envelope window steepness k = 0.25+2.75·smear²; sprite edge softness |
 | asymmetry | −1–1 (0) | envelope skew c = 2^(1.5·asym); − appears, + vanishes |

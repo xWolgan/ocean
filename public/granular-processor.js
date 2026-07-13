@@ -73,10 +73,13 @@ function bassMono(pan, freq, center = 0.7071) {
   return center + (pan - center) * w;
 }
 
-/** SWAPPED mapping: hue is the pitch axis (±1.1 octave around the
- *  register). Hue 0.5 (cyan-ish) sits at the register itself. */
-function hueToFreq(hue, registerHz) {
-  return Math.min(Math.max(registerHz * Math.pow(2, (hue - 0.5) * 2.2), 30), sampleRate * 0.45);
+/** COLOR IS PITCH, as in physics: red is the low frequency of light,
+ *  violet the high one. The spectral hue range (0..0.83) maps onto six
+ *  audible octaves, 55 Hz .. 3520 Hz; the non-spectral magenta seam
+ *  clamps to the violet end. */
+function hueToFreq(hue) {
+  const t = Math.min(hue, 0.83) / 0.83;
+  return Math.min(55 * Math.pow(2, t * 6), sampleRate * 0.45);
 }
 
 function rgbToHsv(r, g, b) {
@@ -155,7 +158,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.p = {
       tau: 0.02,
       density: 0.55,
-      registerHz: 800,
+      scale: 0.4,
       colorRandom: 0.5,
       sizeRandom: 1.0,
       smear: 0.5,
@@ -271,9 +274,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // SWAPPED mapping (Wolgan): COLOR (hue) -> pitch; SIZE -> which
       // secondary tones; saturation -> how much; value -> volume.
       // colorRandom therefore spreads PITCH; sizeRandom spreads TIMBRE.
-      v.freq = hueToFreq(h, p.registerHz);
-      const sizeNorm = 0.5 + (v.sizeRoll - 0.5) * p.sizeRandom;
-      const wheelPos = sizeNorm * n;
+      v.freq = hueToFreq(h);
+      // SIZE is timbre: the scale slider is the base position on the
+      // (circular) wheel; sizeRandom spreads around it
+      const wheelPos = ((p.scale + (v.sizeRoll - 0.5) * p.sizeRandom + 10) % 1) * n;
       v.tableA = Math.floor(wheelPos) % n;
       v.tableB = (v.tableA + 1) % n;
       v.tableFrac = wheelPos - Math.floor(wheelPos);
@@ -427,11 +431,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       ambB * (1 - w) + scatB * w,
     );
     const n = this.wheel.length;
-    // SWAPPED mapping: captured hue -> pitch; captured size -> recipe
-    v.capFreq = hueToFreq(h, o.registerHz);
+    // captured hue -> pitch (object octave transposes); size -> recipe
+    v.capFreq = Math.min(hueToFreq(h) * o.pitchMul, sampleRate * 0.45);
     const srEff = p.sizeRandom + (o.srV - p.sizeRandom) * o.srW;
-    const sizeNorm = 0.5 + (v.sizeRoll - 0.5) * srEff;
-    const wheelPos = sizeNorm * n;
+    const scaleBase = o.scaleBlend;
+    const wheelPos = ((scaleBase + (v.sizeRoll - 0.5) * srEff + 10) % 1) * n;
     v.capTableA = Math.floor(wheelPos) % n;
     v.capTableB = (v.capTableA + 1) % n;
     v.capTableFrac = wheelPos - Math.floor(wheelPos);
@@ -489,7 +493,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       );
       // SWAPPED mapping: the dressed hue retunes the voice's pitch;
       // its recipe stays with the voice's size
-      v.freeFreq = hueToFreq(h, p.registerHz);
+      v.freeFreq = hueToFreq(h);
       v.freeSat = sSat;
       bright = 0.35 + 0.65 * val;
       break;
