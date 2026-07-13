@@ -36,7 +36,10 @@ export class AudioEngine {
       return;
     }
     this.ctx = new AudioContext({ latencyHint: 'interactive' });
-    await this.ctx.audioWorklet.addModule('/granular-processor.js');
+    // BASE_URL so the worklet loads when the app is hosted on a subpath
+    await this.ctx.audioWorklet.addModule(
+      `${import.meta.env.BASE_URL}granular-processor.js`,
+    );
     this.node = new AudioWorkletNode(this.ctx, 'ocean-granular', {
       numberOfInputs: 0,
       numberOfOutputs: 1,

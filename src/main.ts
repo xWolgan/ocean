@@ -142,7 +142,7 @@ renderer.setAnimationLoop((now: number) => {
       `fps       ${fpsEma.toFixed(0)}\n` +
       `particles ${Math.round(field.count * bus.out.density).toLocaleString()}\n` +
       `voices    ${audio.voiceCount}\n` +
-      `backend   ${renderer.backend.constructor.name.replace('Backend', '')}`;
+      `backend   ${(renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2'}`;
   }
 
   applyMovement(dt);

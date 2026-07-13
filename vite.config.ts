@@ -6,6 +6,8 @@ import basicSsl from '@vitejs/plugin-basic-ssl';
 // AudioWorklet require a secure context, and the Quest browser reaches
 // the dev server by LAN IP (accept the self-signed cert warning once).
 export default defineConfig(({ mode }) => ({
+  // relative base: the build works from any subpath (e.g. GitHub Pages)
+  base: './',
   plugins: mode === 'quest' ? [basicSsl()] : [],
   server: {
     host: true,
