@@ -77,6 +77,19 @@ Violations of this principle have caused every audio artifact so far.
 - Commit messages tell the story of the instrument — keep doing that.
 - `FOR_CO-CREATOR.md` is the plain-language player guide (EN/PL).
 
+## Documentation system (binding — see intents/README.md)
+
+- **`SPEC.md`** is the objective description of the app's current state:
+  every functionality, boundary, parameter. Trust it as ground truth on
+  arrival; keep it true on merge.
+- **`intents/<branch>.md`**: create it when you create a branch (goal,
+  idea, what it should feel like); update it with EVERY commit. When
+  reading someone else's branch, read their intent file BEFORE the diff.
+- **On merge to `main`**: fold what became true into SPEC.md and move
+  the intent file to `intents/merged/` (never delete — it's the
+  project's history of ideas). CI fails PRs that change code without
+  touching their intent file or SPEC.md.
+
 ## Design language (for consistency of future features)
 
 Objects are constellations (target clouds + weighted patches + AR

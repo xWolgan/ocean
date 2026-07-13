@@ -17,3 +17,13 @@ jobs:
       - run: npx tsc --noEmit
       - run: node --check public/granular-processor.js
       - run: npm run build
+      - name: Docs guard — code changes need their WHY
+        run: |
+          git fetch origin main --depth=1
+          CHANGED=$(git diff --name-only origin/main...HEAD)
+          if echo "$CHANGED" | grep -qE '^(src/|public/)' \
+             && ! echo "$CHANGED" | grep -qE '^(intents/|SPEC\.md)'; then
+            echo "::error::This PR changes code but neither its intents/<branch>.md nor SPEC.md."
+            echo "Please write down the WHY — see intents/README.md."
+            exit 1
+          fi
