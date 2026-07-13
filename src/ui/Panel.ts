@@ -116,6 +116,7 @@ export function createPanel(
         p.tintB = c.b;
       });
     tuning.add(p, 'tintWeight', 0, 1, 0.01).name('  ↳ weight');
+    tuning.add(p, 'imageColor', 0, 1, 0.01).name('image color (settings ↔ image)');
     tuning.add(p.colorRandom, 'value', 0, 1, 0.001).name('color random (timbre)');
     tuning.add(p.colorRandom, 'weight', 0, 1, 0.01).name('  ↳ weight');
     tuning.add(p.sizeRandom, 'value', 0, 1, 0.001).name('size random (pitch spread)');

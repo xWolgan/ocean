@@ -104,6 +104,10 @@ export class ParticleField {
   private readonly uObjF = uniformArray(
     Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(0.94, 1, 0, 0)),
   );
+  // G: (imageColorWeight, spare, spare, spare)
+  private readonly uObjG = uniformArray(
+    Array.from({ length: SLOT_COUNT }, () => new THREE.Vector4(1, 0, 0, 0)),
+  );
 
   constructor(count: number, targetTexture: THREE.DataTexture) {
     this.count = count;
@@ -168,6 +172,8 @@ export class ParticleField {
     const oE = vec4(this.uObjE.element(slotIdx) as any);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const oF = vec4(this.uObjF.element(slotIdx) as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oG = vec4(this.uObjG.element(slotIdx) as any);
     const tauObj = oC.x.max(0.0005);
 
     // the object's clock: sync blends each particle's private phase toward
@@ -266,15 +272,15 @@ export class ParticleField {
     // color, which overrides fully — the image IS its colors), scattered
     // by the object's own color dispersion
     const crEff = mix(this.uColorRandom, oE.x, oE.y.mul(captured));
-    // the tint acts as a GEL over targets that carry their own colors
-    // (images): multiplicative, scaled by tintWeight — white = neutral
-    const gel = mix(vec3(1, 1, 1), oD.xyz, oC.w);
+    // targets with their own colors (images) blend toward the tint by the
+    // imageColor weight: 1 = the image's colors, 0 = the settings' tint
+    const imgW = colTexel.w.mul(oG.x);
     const capturedTint = mix(
-      mix(oD.xyz, colTexel.xyz.mul(gel), colTexel.w),
+      mix(oD.xyz, colTexel.xyz, imgW),
       randomColor,
       crEff,
     );
-    const tintMixW = oC.w.max(colTexel.w.mul(oA.w)).mul(captured);
+    const tintMixW = oC.w.max(imgW.mul(oA.w)).mul(captured);
     const col = mix(ambientCol, capturedTint, tintMixW);
     material.colorNode = col
       .mul(bright.mul(0.9).add(0.05))
@@ -316,6 +322,7 @@ export class ParticleField {
     const D = this.uObjD.array as THREE.Vector4[];
     const E = this.uObjE.array as THREE.Vector4[];
     const F = this.uObjF.array as THREE.Vector4[];
+    const G = this.uObjG.array as THREE.Vector4[];
     for (let m = 0; m < SLOT_COUNT; m++) {
       const inst = manager.slots[m];
       if (!inst || !inst.cloud || inst.level <= 0.001) {
@@ -352,6 +359,7 @@ export class ParticleField {
         p.smear.weight * inst.level,
         p.asymmetry.weight * inst.level,
       );
+      G[m].set(p.imageColor, 0, 0, 0);
     }
   }
 

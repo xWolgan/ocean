@@ -150,15 +150,14 @@ export async function buildTargets(gen: GeneratorDef, id: string): Promise<Targe
     const aspect = img.height / img.width;
     const w = gen.width;
     const h = w * aspect;
-    // collect candidate pixels above the luma threshold
+    // UNIFORM spread: every pixel of the image is an equally likely home
+    // for a particle — only true transparency is skipped. Dark pixels
+    // become dim particles, not absent ones; the image's structure is
+    // carried by color, never by particle density (that made contours).
     const candidates: number[] = [];
     for (let p = 0; p < img.width * img.height; p++) {
-      const r = img.data[p * 4] / 255;
-      const g = img.data[p * 4 + 1] / 255;
-      const b = img.data[p * 4 + 2] / 255;
       const a = img.data[p * 4 + 3] / 255;
-      const luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) * a;
-      if (luma >= gen.lumaThreshold) candidates.push(p);
+      if (a >= Math.max(0.05, gen.lumaThreshold)) candidates.push(p);
     }
     const n = Math.max(1, candidates.length);
     for (let k = 0; k < K; k++) {
