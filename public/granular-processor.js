@@ -310,17 +310,49 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       if (anyObjects) this.evaluateCapture(v, tHop, spat);
       else v.capOn = 0;
       if (v.capOn) {
-        const o = p.objects[v.asg];
-        const wCap = (Math.sqrt(W) + (W - Math.sqrt(W)) * o.sync) * p.objectGain;
-        // every object cycle whose burst overlaps this block
+        let o = p.objects[v.asg];
+        let wCap = (Math.sqrt(W) + (W - Math.sqrt(W)) * o.sync) * p.objectGain;
+        // every object cycle whose burst overlaps this block. The counter
+        // and bounds index the CURRENT assignment's cycle scheme; a
+        // mid-block handoff to a DIFFERENT object (different tau/sync)
+        // rebases them — mixing the old counter with the new params would
+        // render a burst at no real cycle boundary. Iterations are capped
+        // (64 cycles per 21ms block is beyond any real tau) so a
+        // pathological reassignment ping-pong can't spin.
         let gO = Math.floor(tHop * v.asgInvTau + v.asgPhi);
-        const gOEnd = Math.floor(tEnd * v.asgInvTau + v.asgPhi);
-        for (; gO <= gOEnd; gO++) {
+        let gOEnd = Math.floor(tEnd * v.asgInvTau + v.asgPhi);
+        let iter = 0;
+        for (; gO <= gOEnd && ++iter <= 64; gO++) {
           if (gO !== v.asgGen) {
             // re-evaluate at the cycle's midpoint — the same reach/lottery
             // test the hero path runs at each cycle boundary
-            this.evaluateCapture(v, (gO + 0.5 - v.asgPhi) / v.asgInvTau, spat);
+            const prevAsg = v.asg;
+            const prevInvTau = v.asgInvTau;
+            const prevPhi = v.asgPhi;
+            this.evaluateCapture(v, (gO + 0.5 - prevPhi) / prevInvTau, spat);
+            // KNOWN GAP (deferred, reviewed): when capture is lost here,
+            // the `continue` after this loop still skips the free path for
+            // the REST of this block, where the legacy engine resumes free
+            // bursts sample-exactly — a silent gap bounded by ONE block
+            // (~21ms) at the release instant. Deferred because the hero
+            // selector (next task) promotes freshly-released voices to
+            // sample-accurate heroes at exactly these transition moments,
+            // covering the audible surface. See task-6-report.md.
             if (!v.capOn) break;
+            if (v.asg !== prevAsg || v.asgInvTau !== prevInvTau || v.asgPhi !== prevPhi) {
+              // mid-block HANDOFF: the voice now belongs to an object with
+              // a different cycle scheme. Rebase counter, bounds and the
+              // sync-scaled weight onto the new assignment, resuming from
+              // the yet-unrendered portion of the block (the old cycle's
+              // start clamped to tHop); −1 because the for-increment lands
+              // on the new scheme's first cycle.
+              o = p.objects[v.asg];
+              wCap = (Math.sqrt(W) + (W - Math.sqrt(W)) * o.sync) * p.objectGain;
+              const tCursor = Math.max(tHop, (gO - prevPhi) / prevInvTau);
+              gO = Math.floor(tCursor * v.asgInvTau + v.asgPhi) - 1;
+              gOEnd = Math.floor(tEnd * v.asgInvTau + v.asgPhi);
+              continue;
+            }
           }
           const cycStart = (gO - v.asgPhi) / v.asgInvTau;
           const cycLen = 1 / v.asgInvTau;
