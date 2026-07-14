@@ -33,24 +33,35 @@ export class AudioEngine {
   }
 
   async start(): Promise<void> {
-    if (this.ctx) {
-      if (this.ctx.state === 'suspended') await this.ctx.resume();
-      return;
+    try {
+      if (this.ctx) {
+        if (this.ctx.state === 'suspended') await this.ctx.resume();
+        this.status = this.ctx.state;
+        return;
+      }
+      this.ctx = new AudioContext({ latencyHint: 'interactive' });
+      // BASE_URL so the worklet loads when the app is hosted on a subpath
+      await this.ctx.audioWorklet.addModule(
+        `${import.meta.env.BASE_URL}granular-processor.js`,
+      );
+      this.node = new AudioWorkletNode(this.ctx, 'ocean-granular', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [2],
+      });
+      this.node.port.onmessage = (e) => {
+        if (e.data.type === 'stats') this.voiceCount = e.data.grains;
+      };
+      this.node.connect(this.ctx.destination);
+      this.status = this.ctx.state;
+    } catch (err) {
+      // reset so the next click retries from scratch instead of reusing
+      // a half-built context; surface the reason in the stats overlay
+      this.status = `FAILED: ${err instanceof Error ? err.message : String(err)}`;
+      this.node = null;
+      void this.ctx?.close();
+      this.ctx = null;
     }
-    this.ctx = new AudioContext({ latencyHint: 'interactive' });
-    // BASE_URL so the worklet loads when the app is hosted on a subpath
-    await this.ctx.audioWorklet.addModule(
-      `${import.meta.env.BASE_URL}granular-processor.js`,
-    );
-    this.node = new AudioWorkletNode(this.ctx, 'ocean-granular', {
-      numberOfInputs: 0,
-      numberOfOutputs: 1,
-      outputChannelCount: [2],
-    });
-    this.node.port.onmessage = (e) => {
-      if (e.data.type === 'stats') this.voiceCount = e.data.grains;
-    };
-    this.node.connect(this.ctx.destination);
   }
 
   /**
