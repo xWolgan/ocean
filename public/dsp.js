@@ -81,29 +81,28 @@ export function hannWindow(n) {
 }
 
 /**
- * Complex spectral kernel of `win` sampled at 1/KERNEL_STEPS-bin offsets
- * over ±KERNEL_HW bins: KER[x] = Σ_j win[j]·e^{-i·2π·x·j/n}. Computed by
- * direct DFT once at init (~130k ops) — numerically, so the window's
- * position phase is captured exactly.
+ * Real spectral kernel of the CENTERED window, sampled at 1/KERNEL_STEPS
+ * bin offsets over ±KERNEL_HW bins. Centering (circular shift by n/2)
+ * makes the kernel real and slowly varying, so a LUT can sample it; the
+ * fast-rotating linear phase of the uncentered window is restored
+ * analytically in splatBlob (ψ = phase + π·bin, times (-1)^k per tap).
  */
 export function makeKernel(win) {
   const n = win.length;
   const taps = 2 * KERNEL_HW * KERNEL_STEPS + 1;
   const re = new Float32Array(taps);
-  const im = new Float32Array(taps);
   for (let t = 0; t < taps; t++) {
     const x = (t - KERNEL_HW * KERNEL_STEPS) / KERNEL_STEPS;
     let sr = 0;
-    let si = 0;
     for (let j = 0; j < n; j++) {
-      const a = (-2 * Math.PI * x * j) / n;
-      sr += win[j] * Math.cos(a);
-      si += win[j] * Math.sin(a);
+      // centered window = win re-indexed to j−n/2 (even → real kernel);
+      // the shift must be LINEAR in the cosine argument, not a circular
+      // array wrap — a wrap is off by 2πx per wrapped tap at fractional x
+      sr += win[j] * Math.cos((-2 * Math.PI * x * (j - n / 2)) / n);
     }
     re[t] = sr;
-    im[t] = si;
   }
-  return { re, im };
+  return { re };
 }
 
 /**
@@ -112,17 +111,18 @@ export function makeKernel(win) {
  * first sample; `bin` may be fractional. Skips DC and Nyquist.
  */
 export function splatBlob(specRe, specIm, n, bin, amp, phase, ker) {
-  const cs = 0.5 * amp * Math.cos(phase);
-  const sn = 0.5 * amp * Math.sin(phase);
+  const psi = phase + Math.PI * bin;
+  const cs = 0.5 * amp * Math.cos(psi);
+  const sn = 0.5 * amp * Math.sin(psi);
   const k0 = Math.max(1, Math.ceil(bin - KERNEL_HW));
   const k1 = Math.min((n >> 1) - 1, Math.floor(bin + KERNEL_HW));
   const center = KERNEL_HW * KERNEL_STEPS;
   for (let k = k0; k <= k1; k++) {
     const t = Math.round((k - bin) * KERNEL_STEPS) + center;
     const kr = ker.re[t];
-    const ki = ker.im[t];
-    const br = cs * kr - sn * ki;
-    const bi = sn * kr + cs * ki;
+    const s = k & 1 ? -kr : kr;
+    const br = cs * s;
+    const bi = sn * s;
     specRe[k] += br;
     specIm[k] += bi;
     specRe[n - k] += br;
