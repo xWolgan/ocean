@@ -212,3 +212,28 @@ test('hero promotion does not click', async () => {
   // a click is a near-full-scale step; envelopes+fades keep deltas small
   assert.ok(maxJump < 0.25, `max sample delta ${maxJump}`);
 });
+
+test('bed/hero crossfade is complementary: no energy dug out at moderate weight', async () => {
+  // W=16: one pool voice is a real mix component, so a one-sided handoff
+  // (bed dropping its share instantly at promotion while heroGain still
+  // ramps from 0) digs an audible 80ms energy hole per promotion. Before
+  // fillBed learned to render each voice at (1 − heroGain) this measured
+  // -0.815 dB here; after, +0.060 dB — the tight ±0.4 dB tolerance (vs
+  // the W=1 test's ±2 dB) is what makes this a real regression guard
+  // (renders are fully deterministic, so the margin is safe).
+  //
+  // NB a max-sample-delta form of this test (reviewer's first
+  // suggestion) cannot work at this weight: the heroCount:0 control —
+  // pure bed, zero hero code — already has maxJump 0.31 from bed content
+  // through the limiter, above any click threshold that would bind.
+  // Energy conservation is the property the crossfade actually owns.
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  const params = { ...BASE_PARAMS, particleCount: 4096 };
+  globalThis.currentTime = 0;
+  const with32 = render(new Engine(), 3.0, { ...params, heroCount: 32 }).L.slice(48000);
+  globalThis.currentTime = 0;
+  const with0 = render(new Engine(), 3.0, { ...params, heroCount: 0 }).L.slice(48000);
+  const rms = (b) => Math.sqrt(b.reduce((a, x) => a + x * x, 0) / b.length);
+  const db = 20 * Math.log10(rms(with32) / rms(with0));
+  assert.ok(Math.abs(db) < 0.4, `crossfade leaked ${db.toFixed(3)} dB at W=16`);
+});

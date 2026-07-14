@@ -96,5 +96,13 @@ studio PC.
   pre-existing (non-hero, unrelated to this task) limiter headroom-
   saturation transient at extreme particleCount that one test's
   parameters were adjusted to avoid: `.superpowers/sdd/task-7-report.md`.
+  Review fix round: the handoff became a TRUE crossfade — fillBed now
+  renders each voice at `(1 − heroGain)` instead of hard-skipping heroes,
+  so the bed's share fades out exactly as the hero's fades in (linear
+  complements are correct because the bed's slot-anchored phases are
+  exact: both render nearly the same signal, so the gains must sum to 1).
+  Before this, promotion dropped the bed share instantly while the hero
+  was still ramping — measured -0.815dB of energy dug out of the mix at
+  W=16, conserved (+0.06dB) after; guarded by a new ±0.4dB test at W=16.
 - Next: understudy / further hero tuning, per the design doc's Stage 2.
 - Supersedes Monika's local 64-voice patch (do not merge it).

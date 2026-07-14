@@ -380,7 +380,20 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const anyObjects = p.objects.some((o) => o && o.level > 0.001);
     const blockT = BLOCK / sampleRate;
     for (let k = 0; k < POOL; k++) {
-      if (this.isHero[k]) continue;
+      // complementary crossfade with the hero path: the bed renders this
+      // voice at (1 − heroGain) while the hero loop renders it at
+      // heroGain. LINEAR complements (not equal-power) are correct here
+      // because the bed's slot-anchored phases are exact — bed and hero
+      // render nearly the SAME signal, so the two gains must sum to 1 to
+      // reconstruct it (a hard isHero skip here dropped the bed share
+      // instantly at promotion while heroGain was still ramping from 0:
+      // an 80ms energy dip per promotion, mirror-image gap on demotion —
+      // worst at high W where one pool voice is a big mix component).
+      // heroGain is read at hop start, ≤1 hop (10.7ms) stale within the
+      // 80ms ramp — accepted. A fully-promoted voice costs the bed
+      // nothing (the continue below).
+      const bedG = 1 - this.heroGain[k];
+      if (bedG <= 0.001) continue;
       const v = this.voices[k];
       let sounding = false; // did this voice splat anything this hop?
 
@@ -486,6 +499,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
               amp *= this.win[Math.min(BLOCK - 1, pc | 0)] * GRAIN_COLA;
             }
           }
+          amp *= bedG; // bed's complement of the hero crossfade
           if (amp <= 0.0002) continue;
           sounding = true;
           const bin = (v.capFreq * BLOCK) / sampleRate;
@@ -612,6 +626,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             amp *= this.win[Math.min(BLOCK - 1, pc | 0)] * GRAIN_COLA;
           }
         }
+        amp *= bedG; // bed's complement of the hero crossfade
         if (amp <= 0.0002) continue;
         sounding = true;
         const bin = (v.freeFreq * BLOCK) / sampleRate;
@@ -1074,6 +1089,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const W = Math.max(1, p.particleCount / POOL);
     const sqrtW = Math.sqrt(W);
     const wFreeHero = sqrtW * p.fieldGain;
+    const gStep = 1 / (0.08 * sampleRate); // 80ms linear hero fade ramp
 
     const anyObjects = p.objects.some((o) => o && o.level > 0.001);
     for (let k = 0; k < POOL; k++) {
@@ -1091,7 +1107,6 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       else v.capOn = 0;
       if ((v.capOn ? v.capAmp : v.amp) > 0.0002) activeHeroes++;
 
-      const gStep = 1 / (0.08 * sampleRate); // 80ms linear ramp
       const gTarget = this.heroTarget[k];
 
       // fast path: a silent voice with no generation boundary inside this
