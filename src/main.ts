@@ -5,6 +5,7 @@ import { XRButton } from 'three/addons/webxr/XRButton.js';
 import { FIELD_CENTER } from './state/FieldState';
 import { ModulationBus } from './state/ModulationBus';
 import { ParticleField } from './field/ParticleField';
+import { ReadbackProbe } from './field/ReadbackProbe';
 import { AudioEngine } from './audio/AudioEngine';
 import { Interaction } from './input/Interaction';
 import { createPanel } from './ui/Panel';
@@ -14,7 +15,9 @@ import { CompositorAids } from './ui/CompositorAids';
 
 const bus = new ModulationBus();
 const objects = new ObjectManager();
-const settings = { particleCount: 1 << 17 };
+const urlParams = new URLSearchParams(location.search);
+const countParam = Number.parseInt(urlParams.get('count') ?? '', 10);
+const settings = { particleCount: Number.isFinite(countParam) && countParam > 0 ? countParam : 1 << 17 };
 
 const renderer = new THREE.WebGPURenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -46,6 +49,10 @@ controls.mouseButtons = {
 
 let field = new ParticleField(settings.particleCount, objects.targetTexture, objects.imageTextures);
 scene.add(field.mesh);
+
+// Stage-2 gate: fenced-readback cost probe, inert unless ?probe=readback
+const readbackProbe =
+  urlParams.get('probe') === 'readback' ? new ReadbackProbe(renderer, settings.particleCount) : null;
 
 function setParticleCount(count: number): void {
   scene.remove(field.mesh);
@@ -142,7 +149,8 @@ renderer.setAnimationLoop((now: number) => {
       `particles ${Math.round(field.count * bus.out.density).toLocaleString()}\n` +
       `voices    ${audio.voiceCount} heroes + ~${audio.bedCount.toLocaleString()} bed\n` +
       `audio     ${audio.status}\n` +
-      `backend   ${(renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2'}`;
+      `backend   ${(renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2'}` +
+      (readbackProbe ? `\n${readbackProbe.stats}` : '');
   }
 
   applyMovement(dt);
@@ -158,6 +166,7 @@ renderer.setAnimationLoop((now: number) => {
   controls.update();
 
   renderer.render(scene, camera);
+  readbackProbe?.update();
 });
 
 window.addEventListener('resize', () => {

@@ -163,5 +163,36 @@ studio PC.
   separates cleanly. Two consecutive PROBE PASS runs (margins
   22.0/23.2dB, voices 30/28). Full derivation in the task-9 report's
   fix-round section.
-- Next: understudy / further hero tuning, per the design doc's Stage 2.
+- Task 10 landed: the Stage-2 gate itself, `src/field/ReadbackProbe.ts`
+  (a `THREE.Points` + `PointsNodeMaterial` cloud rendered additively into
+  a 32x8 float `RenderTarget`, `.count`-instanced exactly like
+  `ParticleField`'s `Sprite.count` — confirmed by reading
+  `RenderObject.js`'s `getDrawParameters()`: any object's `.count` feeds
+  `instanceCount` identically for both mechanisms, so the brief's
+  `Points` starter code needed no InstancedBufferGeometry fallback), gated
+  behind `?probe=readback` in `main.ts` (plus a new `?count=N` override so
+  a single page load can be pinned to a particle count without touching
+  `__oceanSetCount`), reporting a rolling avg/max readback ms + queue
+  depth on the stats overlay. `renderer.readRenderTargetPixelsAsync`
+  exists with the brief's exact signature on this three (0.185.1) and is
+  typed in `@types/three`'s `Renderer.d.ts` (shared by both WebGPU and
+  WebGL2 backends).
+  Measured on Wolgan's desktop via the new `probes/readback_probe.py`
+  (same Playwright hygiene as `audio_stage1.py`): this Playwright
+  Chromium build exposes no `navigator.gpu` even with
+  `--enable-unsafe-webgpu`, so the renderer ran its WebGL2 fallback path
+  for this measurement (the same fallback CLAUDE.md requires Quest to
+  keep working). Result: stable ~16.7ms avg/~19ms max at 131,072
+  particles, but wildly unstable 22-285ms avg/35-484ms max at 524,288
+  across five repeated runs with no code changes — fps stayed within
+  ~2% of the no-probe baseline throughout (the readback is genuinely
+  async, not frame-blocking), so it's the round-trip cost itself, not
+  render time, that fails the gate. **NO-GO on this backend**: even the
+  best case is 2x over the 8ms ceiling. Recorded in `PERF.md` under
+  "Readback probe (stage-2 gate)"; the Quest row is still "(fill in)" —
+  a true WebGPU reading (desktop or Quest) is needed before Stage 2 is
+  ruled out entirely, since this result is specific to the WebGL2 path.
+  Full detail in `.superpowers/sdd/task-10-report.md`.
+- Next: understudy / further hero tuning, per the design doc's Stage 2 —
+  now gated by task 10's readback numbers above.
 - Supersedes Monika's local 64-voice patch (do not merge it).
