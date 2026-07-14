@@ -207,8 +207,9 @@ export function makeKernel(win) {
     const x = (t - KERNEL_HW * KERNEL_STEPS) / KERNEL_STEPS;
     let sr = 0;
     for (let j = 0; j < n; j++) {
-      const wc = win[(j + n / 2) % n]; // centered window (even → real DFT)
-      sr += wc * Math.cos((-2 * Math.PI * x * j) / n);
+      // LINEAR shift to the window center — a circular index wrap equals
+      // centering only at integer x; at fractional offsets it breaks
+      sr += win[j] * Math.cos((-2 * Math.PI * x * (j - n / 2)) / n);
     }
     re[t] = sr;
   }
