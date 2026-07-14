@@ -10,6 +10,13 @@ OCEAN runs entirely in your web browser. There is nothing to install.
    `https://<name>.github.io/<repo>/`).
 3. Click once anywhere in the window — this switches the sound on
    (browsers require a click before they allow audio).
+   **No sound?** Right-click the browser tab — if it says "Unmute site",
+   click it. Then the padlock next to the address → Site settings →
+   Sound → Allow, and refresh. The `audio` line in the top-left corner
+   tells you what the sound engine is doing (`running` = all good) —
+   if it says anything else, send that exact text to Wolgan.
+   One more thing worth knowing: **color is pitch** — red is low,
+   violet is high, like the spectrum of light.
 4. Play:
    - **W / A / S / D** — move through the space, **Q / E** — down / up,
      hold **Shift** to move faster, **right-drag** the mouse to look around.
@@ -33,6 +40,14 @@ OCEAN działa w całości w przeglądarce. Niczego nie trzeba instalować.
    `https://<nazwa>.github.io/<repo>/`).
 3. Kliknij raz gdziekolwiek w oknie — to włącza dźwięk (przeglądarki
    wymagają kliknięcia, zanim pozwolą grać dźwiękowi).
+   **Nie ma dźwięku?** Kliknij prawym przyciskiem na kartę przeglądarki —
+   jeśli widzisz "Wyłącz wyciszenie witryny", kliknij to. Potem kłódka
+   przy adresie → Ustawienia witryny → Dźwięk → Zezwalaj, i odśwież.
+   Linijka `audio` w lewym górnym rogu mówi, co robi silnik dźwięku
+   (`running` = wszystko gra) — jeśli pisze coś innego, wyślij ten
+   tekst Wolganowi.
+   I jeszcze jedno, warto wiedzieć: **kolor to wysokość dźwięku** —
+   czerwony jest nisko, fioletowy wysoko, jak widmo światła.
 4. Graj:
    - **W / A / S / D** — poruszanie się, **Q / E** — dół / góra,
      **Shift** — szybciej, **prawy przycisk myszy + ruch** — rozglądanie.

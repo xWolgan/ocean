@@ -15,15 +15,18 @@ npm install
 npm run dev        # http://localhost:5173
 ```
 
-- **move mouse** — aim the attractor
-- **hold left mouse** — condense the field (noise → form, hiss → tone)
-- **right-drag** — orbit, **wheel** — zoom
-- first click enables sound
+- **W/A/S/D** — fly, **Q/E** — down/up, **Shift** — fast,
+  **right-drag** — look around
+- **hold left mouse** — play the selected object (attraction envelope:
+  noise → form, hiss → tone)
+- first click enables sound (retries on every click; the `audio` line in
+  the stats overlay says what the engine is doing)
 - panel (top right): the substance parameters, each with an audible twin —
-  density (grain rate), speed (sonic restlessness/glides), scale
-  (register: big = low), lifespan (turnover / grain duration), tint
-  (visual), color randomness (the color of the noise: one band ↔ white);
-  performance folder switches particle count (16k → 1M)
+  density (grain rate), scale (timbre), lifespan (grain duration), tint
+  (color IS pitch: red = low ↔ violet = high), color randomness (pitch
+  spread), size randomness (timbre spread); `objects` folder = the
+  instruments (create by clicking/drawing in the field); performance
+  folder switches particle count (16k → 1M)
 
 Renders on WebGPU where available, falls back to WebGL2 automatically
 (current backend shown in the stats overlay, top left).
@@ -50,8 +53,8 @@ is a flash: born at a hash-derived position, alive 1–100 ms (`lifespan`),
 gone, reborn. The whole field is a stateless, deterministic function of
 time built from PCG hashes — the GPU evaluates it per particle per frame;
 the audio worklet evaluates the *same function* sample-accurately for a
-strided sample of 256 particles (each is a grain: a noise burst through
-its color band, windowed by its life). No readback, no latency: two
+strided sample of 256 particles (each is a grain: a sine/wavetable tone
+at its color's pitch, windowed by its life). No readback, no latency: two
 renderings of one process. Grain theory (Gabor): below ~30 events/s we
 see/hear rhythm; above, flashes fuse into glow (flicker fusion) and grain
 trains fuse into pitch — the same threshold in two senses.
@@ -90,9 +93,9 @@ therefore also the pitch axis: 100 ms = 10 Hz pulse, 1 ms = 1 kHz tone.
   | duration | lifespan |
   | envelope softness | smear (one window: temporal fade + spatial edge + amplitude curve) |
   | envelope skew | asymmetry (appear ↔ vanish — the grain's arrow of time) |
-  | content pitch | size (big = low; sizeRandom = pitch spread, 0 = one tone) |
+  | content pitch | hue — the light spectrum is the keyboard (red 55 Hz → violet 3.5 kHz, 6 octaves); colorRandom = pitch spread, 0 = one tone |
   | secondary tones: amount | saturation |
-  | secondary tones: recipe | hue (circular timbre wheel) |
+  | timbre recipe | size (circular 6-recipe wavetable wheel; sizeRandom = timbre spread) |
   | spatial position | itself (pan + distance) |
   | rate | emergent: density ÷ lifespan |
   | regularity → pitch-from-rate | order = attractor synchronization |

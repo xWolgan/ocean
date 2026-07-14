@@ -42,9 +42,9 @@ them; players will eventually play them in VR.
 | envelope softness | smear (temporal fade + sprite edge + amplitude curve) |
 | envelope skew | asymmetry (appear ↔ vanish; the grain's arrow of time) |
 | content | pure sine, always |
-| — pitch | size (big = low); sizeRandom = pitch spread |
+| — pitch | hue: the light spectrum is the keyboard — spectral hue 0…0.83 → 55 Hz…3520 Hz exponentially (red = low, violet = high, 6 octaves; magenta clamps at violet); colorRandom = pitch spread |
 | — secondary tones, amount | color saturation |
-| — secondary tones, recipe | hue (circular 6-recipe wavetable timbre wheel) |
+| — timbre recipe | size (position on the circular 6-recipe wavetable wheel, fract-wrapped); sizeRandom = timbre spread |
 | spatial position | itself (pan + distance loudness; bass narrows to mono) |
 | rate | emergent: density ÷ lifespan |
 | regularity → pitch-from-rate | object sync (phase-locked pulse at 1/tau) |
@@ -63,9 +63,9 @@ shimmer.
 | lifespan | 0–1 (0.7) | flash/grain duration 1–100 ms; also object pulse pitch base |
 | smear | 0–1 (0.5) | envelope window steepness k = 0.25+2.75·smear²; sprite edge softness |
 | asymmetry | −1–1 (0) | envelope skew c = 2^(1.5·asym); − appears, + vanishes |
-| tint | color (0.75,0.78,0.85) | hue→timbre recipe, saturation→richness, value→volume |
-| colorRandom | 0–1 (0.5) | per-particle color scatter (timbre/brightness dispersion) |
-| sizeRandom | 0–1 (1.0) | per-particle size scatter = pitch spread (0 = one tone, 1 ≈ ±0.77 oct) |
+| tint | color (0.75,0.78,0.85) | hue→pitch (light spectrum), saturation→secondary-tone amount, value→volume |
+| colorRandom | 0–1 (0.5) | per-particle color scatter = pitch spread (0 = one tone) |
+| sizeRandom | 0–1 (1.0) | per-particle size scatter = timbre spread over the wheel |
 | gain | 0–1 (0.5) | master audio |
 | fieldGain | 0–1 (1) | environment voices fader |
 | objectGain | 0–1 (1) | captured/object voices fader |
@@ -119,20 +119,21 @@ An object = **constellation** (8192 targets, optional per-target colors)
   grain length ×2^−oct (big things are lower AND slower). At −3 an
   object reaches 20–80 Hz sub-bass (verified 87% of energy there).
 - Patch (each {value, weight}; weight 0 = inherit environment, 1 = fully
-  imposed): lifespan (pulse pitch), scale (register), tint+tintWeight,
+  imposed): lifespan (pulse pitch), scale (timbre base), tint+tintWeight,
   colorRandom, sizeRandom, smear, asymmetry; plus scalar sync, gain
   (0–1.5), octave.
 - Generators (all produce target clouds; seeded per object id, so saved
   scenes regenerate identical constellations):
   - point (gaussian, sigma)
-  - curve (Catmull-Rom through drawn control points; closed可 + optional
+  - curve (Catmull-Rom through drawn control points; closeable + optional
     surface fill toward centroid; thickness)
   - primitive: sphere / box / cylinder × surface / volume
-  - image (data-URL, optional depth map; targets spread UNIFORMLY over
-    the image — structure is carried by color, never by particle density;
-    each target carries its pixel's color = its spectrum; the patch's
-    `imageColor` (0–1) blends particle colors between the settings' tint
-    (0) and the image's own pixels (1))
+  - image (data-URL, optional depth map; no targets at all — an analytic
+    rectangle carrying the full-resolution property field; landings are
+    continuous (u,v), UNIFORM over the rectangle — structure is carried
+    by color, never by particle density; the patch's `imageColor` (0–1)
+    blends particle colors between the settings' tint (0) and the
+    image's own pixels (1))
 - Playing: in `play` mode, holding left mouse gates the SELECTED object
   through the touch envelope. `active` latches it on.
 
@@ -157,25 +158,34 @@ sample of real particles; bit-exact hash twin of the GPU).
 - Clock: worklet time = audio clock + slewed offset to the app clock
   (hard resync only on >50 ms jumps).
 - Silent voices with no birth inside a block skip their sample loop.
+- Start: armed by user click (browser autoplay policy). EVERY click
+  retries until running; a failed start resets the context cleanly and
+  reports `FAILED: <reason>`. The engine state is always visible as the
+  `audio` line in the stats overlay (`off (click to start)` / `running`
+  / `suspended` / `FAILED: …`) — a non-technical tester can read it
+  aloud for remote diagnosis.
 
 ## 8. Compositor UI
 
 - WASD+QE fly (Shift fast), right-drag look, left hold = play selected.
 - Authoring modes: point / curve (draw) / sphere / box / image — placed
   on a horizontal plane (panel height) with grid + 3D cursor with
-  drop-line; color-coded object markers (selected pulses); "look at it"
-  button; object CRUD + full tuning panel; separate gains; particle
-  count; stats overlay (fps, particles, voices, backend).
+  drop-line. Primitives are drag-sized: press places the center, drag
+  sets the radius, release commits; a live wireframe/outline preview
+  shows every object before it exists (curve strokes draw as a line).
+  Color-coded object markers (selected pulses); "look at it" button;
+  object CRUD + full tuning panel; separate gains; particle count; stats
+  overlay (fps, particles, voices, audio status, backend).
 - Scenes: save = JSON download + localStorage (bases + tint + object
   defs, Infinity-safe); load = file picker. Constellations regenerate
   from defs (images embedded as data-URLs).
 
 ## 9. Boundaries & performance
 
-- 8 object slots; 2048 targets/object; 256 audio voices; particle count
-  16k–1M (default 131k); field 6×3×6 m; register floor 180 Hz at
-  octave 0 (sub-bass via object octave); flash duration 1–100 ms ×
-  octave stretch.
+- 8 object slots; 8192 targets/object (curve tables); 256 audio voices;
+  particle count 16k–1M (default 131k); field 6×3×6 m; pitch range
+  55 Hz–3520 Hz from hue at octave 0 (sub-bass 20–80 Hz via object
+  octave −3); flash duration 1–100 ms × octave stretch.
 - Verified: 60 fps at 131k particles on the WebGL2 fallback with 4
   objects active; limiter holds peak <0.6 with all 256 voices at max.
 - Target: standalone Quest 3 (probe procedure in README); WebGL2
