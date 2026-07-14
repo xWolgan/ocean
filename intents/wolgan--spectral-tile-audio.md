@@ -46,6 +46,9 @@ studio PC.
 
 - Design doc written and approved in conversation:
   `docs/superpowers/specs/2026-07-14-spectral-tile-audio-design.md`.
-- Next: implementation plan, then Stage 1 (heroes + analytic tiles),
-  then the Quest readback probe gating Stage 2 (GPU-measured tiles).
+- Implementation plan for Stage 1 + the readback probe:
+  `docs/superpowers/plans/2026-07-14-spectral-tile-audio-stage1.md`
+  (11 tasks; Stage 2 gets its own plan once the probe numbers exist).
+- Next: execute the plan — Stage 1 (heroes + analytic tile bed), then
+  the Quest readback probe gating Stage 2 (GPU-measured tiles).
 - Supersedes Monika's local 64-voice patch (do not merge it).
