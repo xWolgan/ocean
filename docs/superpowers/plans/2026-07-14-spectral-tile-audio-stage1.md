@@ -1024,15 +1024,28 @@ Overlay: replace the voices line with:
       `voices    ${audio.voiceCount} heroes + ~${audio.bedCount.toLocaleString()} bed\n` +
 ```
 
-- [ ] **Step 3: Verify**
+- [ ] **Step 3: Master loudness normalization (added after Task 7's limiter finding)**
 
-Run: `npx tsc --noEmit` — pass. Run: `node --test tests/` — pass.
+The bed's √W weighting makes total output scale with √particleCount — at the app default (131k particles, W=512) the mix runs ~22× hotter than the legacy calibration and pins the limiter (measured in Task 7: saturation transients from `particleCount ≥ ~65536`). Pin absolute loudness to the legacy calibration while preserving every internal ratio: in the worklet's params ingestion, compute
 
-- [ ] **Step 4: Commit**
+```js
+// the particle-count dial is a performance dial, not a crescendo: pin
+// perceived loudness to the legacy calibration at any count, keep all
+// internal ratios (density, layers, objects) honest
+this.masterNorm = 1 / Math.sqrt(Math.max(1, this.p.particleCount / POOL));
+```
+
+and apply it in the output stage: `const gain = p.gain * 2.4 * this.masterNorm;`. Add a test: render 3s at `particleCount: 256` and at `particleCount: 131072` (heroCount 32, BASE_PARAMS otherwise), total RMS within ±3 dB of each other (different random ensembles, statistically similar level).
+
+- [ ] **Step 4: Verify**
+
+Run: `npx tsc --noEmit` — pass. Run: `node --test "tests/*.test.mjs"` — pass.
+
+- [ ] **Step 5: Commit**
 
 ```powershell
-git add src/audio/AudioEngine.ts src/main.ts
-git commit -m "Bridge learns the field's true size: particleCount + hero/bed overlay"
+git add src/audio/AudioEngine.ts src/main.ts public/granular-processor.js tests/engine.test.mjs
+git commit -m "Bridge learns the field's true size: particleCount, hero/bed overlay, pinned loudness"
 ```
 
 ---
