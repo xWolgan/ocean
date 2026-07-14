@@ -40,9 +40,13 @@ export class AudioEngine {
         return;
       }
       this.ctx = new AudioContext({ latencyHint: 'interactive' });
-      // BASE_URL so the worklet loads when the app is hosted on a subpath
+      // ?audio=legacy loads the frozen pre-tile engine for A/B comparison
+      const engineFile =
+        new URLSearchParams(location.search).get('audio') === 'legacy'
+          ? 'granular-legacy.js'
+          : 'granular-processor.js';
       await this.ctx.audioWorklet.addModule(
-        `${import.meta.env.BASE_URL}granular-processor.js`,
+        `${import.meta.env.BASE_URL}${engineFile}`,
       );
       this.node = new AudioWorkletNode(this.ctx, 'ocean-granular', {
         numberOfInputs: 0,
