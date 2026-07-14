@@ -61,10 +61,11 @@ fails the gate.
 **GO/NO-GO on this desktop (WebGL2 fallback): NO-GO.** Even the best
 observed case (16.7ms avg at 131k) is more than 2x the 8ms ceiling, and
 the 524k case is both worse on average and unstable by more than an
-order of magnitude run to run. fps holds (well within the 5% band), so
-the render loop itself is not the bottleneck — the fenced readback's
-round-trip cost is. This machine could not produce a true WebGPU
-reading (`navigator.gpu` unavailable in the installed Playwright
-Chromium build), so this NO-GO is specific to the WebGL2 path; a native
-WebGPU desktop run and the Quest run below are needed before Stage 2 is
-ruled out entirely.
+order of magnitude run to run. fps stayed within the 5% band across all
+runs (+2.6% to -4.5%, that worst case coinciding with the run whose
+readback averaged 417ms), so the render loop itself is not the
+bottleneck — the fenced readback's round-trip cost is. This machine
+could not produce a true WebGPU reading (`navigator.gpu` unavailable in
+the installed Playwright Chromium build), so this NO-GO is specific to
+the WebGL2 path; a native WebGPU desktop run and the Quest run below are
+needed before Stage 2 is ruled out entirely.

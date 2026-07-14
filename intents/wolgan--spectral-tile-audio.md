@@ -200,6 +200,50 @@ studio PC.
   a true WebGPU reading (desktop or Quest) is needed before Stage 2 is
   ruled out entirely, since this result is specific to the WebGL2 path.
   Full detail in `.superpowers/sdd/task-10-report.md`.
-- Next: understudy / further hero tuning, per the design doc's Stage 2 —
-  now gated by task 10's readback numbers above.
-- Supersedes Monika's local 64-voice patch (do not merge it).
+- Task 11 (this one) landed: the documentation truth pass. `SPEC.md`,
+  `README.md`, `CLAUDE.md`, `FOR_CO-CREATOR.md` (EN+PL), and `PERF.md`
+  now state what Tasks 1–10 actually built rather than the original plan
+  — most notably that the bed is NOT the analytically-modeled
+  "understudy" the design doc sketched for Stage 1; it is the legacy
+  oscillator's own exact closed-form phases (salt 1201 retired), so it
+  is measured-exact, not statistical. `CLAUDE.md`'s deterministic-twins
+  invariant is restated (the destination is one GPU evaluation projected
+  twice; today's duplicated-math duty over `granular-processor.js` still
+  applies in full) and the WebGL2 no-readback rule gets its ≤8 KB fenced
+  carve-out. Verification commands updated: the worklet is an ES module,
+  so `node --test "tests/*.test.mjs"` replaces
+  `node --check public/granular-processor.js` (legacy engine keeps its
+  `node --check`).
+
+## State: Stage 1 — complete
+
+Stage 1 (heroes + spectral-tile bed, replacing 256-voice per-sample
+synthesis) is implemented, tested and documented. Commits on this branch
+(oldest to newest): `1f22f9f` design doc, `1eb74c1` plan, `dfda1fa` freeze
+legacy engine behind `?audio=legacy`, `f1e8d69`/`31e5b67`/`08a02e8`/
+`b1e5d91` DSP core (FFT, Hann/COLA, blob splat, kernel-centering fixes),
+`75cee70` offline test harness, `eb21b55` tile synthesis spine (IFFT +
+OLA), `263057d`/`0304678` free field as a tile (Gabor grain kernels,
+slot-anchored phases, salt 1201 retired), `696881f`/`9d74aa5`/`cfe3d50`
+captured/object voices in the bed on the object clock + GPU tau-floor
+parity, `16a5a74`/`57d0ce5`/`3f44a81` hero selection + true crossfade
+handoff, `2bcbccc` particle-count-aware bridge + masterNorm loudness pin,
+`03ddd4d`/`7a4aee8` live-browser probe + offline throughput number,
+`5da7442`/`a99e444` the Stage-2 readback probe itself. All null/exactness/
+autocorrelation tests pass (`node --test "tests/*.test.mjs"`, 15 tests);
+live probe measured ~30 heroes + ~44k bed voices sounding in the app's
+default scene; offline throughput 9.3x realtime at 524,288 particles.
+
+What remains before a Stage 2 plan can be written: the readback-cost gate
+is only half-measured. Desktop WebGL2 fallback is NO-GO (16.7ms avg
+@131k vs an 8ms ceiling; 524k unstable to 417ms avg) — but that
+Playwright Chromium build exposed no `navigator.gpu`, so the WebGPU path
+is UNMEASURED, and the Quest row is still open. Until a WebGPU reading
+(desktop or Quest) and a real Quest measurement exist, Stage 2 (GPU splat
+pass + fenced tile readback, demoting the worklet's own bed computation
+to understudy) stays gated per the design doc's own rule: fail → Stage 1
+ships permanently; the architecture keeps its shape either way. This PR
+does not decide that; it only finishes what Stage 1 promised.
+
+- Supersedes Monika's local 64-voice patch (do not merge it) — her
+  machine is now a Stage-1 target instead of needing a smaller pool.

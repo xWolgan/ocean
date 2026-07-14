@@ -28,6 +28,15 @@ let them diverge. If you change one side and not the other, image and
 sound silently stop being the same thing, which breaks the artwork's
 central premise.
 
+The mass audio path is transitioning per
+`docs/superpowers/specs/2026-07-14-spectral-tile-audio-design.md`: the
+DESTINATION is one GPU evaluation projected twice (image + spectrum).
+Today (Stage 1) the pool/bed still replicates the math CPU-side, and it
+must remain bit-exact — including the hero path and the bed's
+slot-anchored phases — so the duplicated-math duty above STILL APPLIES
+in full to `granular-processor.js`. Do not weaken that warning because
+Stage 2 is planned; it isn't built.
+
 ## The foreign-clock principle
 
 No clock that isn't part of the universe may touch the substance:
@@ -44,6 +53,12 @@ Violations of this principle have caused every audio artifact so far.
 - **WebGL2 fallback must keep working** (Quest may need it): three.js
   emulates compute via transform feedback — max ONE buffer write per
   thread per pass, NO scatter writes, NO per-frame GPU readbacks.
+  EXCEPTION: the ≤8 KB fenced audio-tile/statistics readback (see the
+  spectral-tile-audio spec §6; `?probe=readback` measures its cost). The
+  prohibition stands for substance buffers — this carve-out is for that
+  one bounded, fenced, async tile/stat readback only, and it is still
+  gated (see PERF.md — desktop WebGL2 fallback is NO-GO; Quest/WebGPU
+  measurements are open).
 - **Audio worklet hot loop**: no Math.pow, no allocation, no per-sample
   trig. Envelopes are baked into LUTs on parameter changes.
 - TSL `uniformArray` stores its data under `.array`, not `.value`.
@@ -54,7 +69,10 @@ Violations of this principle have caused every audio artifact so far.
 
 ## Verification (do this before claiming anything works)
 
-- `npx tsc --noEmit` and `node --check public/granular-processor.js`.
+- `npx tsc --noEmit` and `node --test "tests/*.test.mjs"` (the worklet is
+  an ES module now, not a checkable script — the test harness's import of
+  it is the syntax check; `node --check public/granular-legacy.js` still
+  applies to the frozen legacy file).
 - Drive the real app with Playwright (Python), ALWAYS: foreground with a
   timeout, `try/finally browser.close()`, launch args
   `--enable-gpu --use-angle=d3d11 --autoplay-policy=no-user-gesture-required`

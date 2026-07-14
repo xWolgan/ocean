@@ -82,10 +82,22 @@ therefore also the pitch axis: 100 ms = 10 Hz pulse, 1 ms = 1 kHz tone.
 - `src/field/ParticleField.ts` — the process as TSL material nodes (fully
   stateless, no compute passes) + `pcgHash`, the bit-exact JS replica of
   TSL's hash that keeps both renderings on the same randomness.
-- `public/granular-processor.js` — the twin scheduler: 256 voices evaluate
-  the same lifetimes/phases/positions/lotteries and synthesize each flash
-  as a grain whose content is a PURE SINE plus secondary tones from the
-  particle's color. The settled grain↔particle mapping:
+- `public/granular-processor.js` — the twin scheduler. It no longer
+  synthesizes 256 voices sample-by-sample; it renders the SAME 256-voice
+  pool through three renderers: a few dozen salience-picked **hero**
+  voices, still sample-accurate and bit-exact with the GPU (the
+  foreground — interaction, capture/release transitions, the
+  nearest/loudest); and the **spectral-tile bed**, which sums every other
+  voice's complex spectral footprint into one 1024-bin block and runs a
+  single inverse FFT (+ Hann overlap-add) per hop per ear to reconstruct
+  the sample-accurate sum of thousands of voices at once — the tile is to
+  the ear what a pixel buffer is to the eye: one shared canvas the many
+  don't each pay to draw into. A third path, the frozen pre-tile engine,
+  is kept behind `?audio=legacy` for A/B and null-test comparison. Every
+  renderer evaluates the same lifetimes/phases/positions/lotteries and the
+  same grain content: a PURE SINE plus secondary tones from the particle's
+  color. Full design: `docs/superpowers/specs/2026-07-14-spectral-tile-audio-design.md`.
+  The settled grain↔particle mapping:
 
   | grain parameter | visual cue |
   |---|---|
