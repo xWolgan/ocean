@@ -81,3 +81,39 @@ test('null test: free-field bed matches legacy band energies (W=1)', async () =>
     assert.ok(Math.abs(db) < 3, `band ${b} off by ${db.toFixed(2)} dB`);
   }
 });
+
+function autocorrPeak(buf, lag) {
+  let num = 0, den = 0;
+  for (let i = 0; i < buf.length - lag; i++) {
+    num += buf[i] * buf[i + lag];
+    den += buf[i] * buf[i];
+  }
+  return num / (den || 1);
+}
+
+test('order: a synced object pulses at 1/tau in the bed, like legacy', async () => {
+  // fields must match ObjectManager.audioDescriptors() exactly
+  // (src/objects/ObjectManager.ts) — the brief's own object literal was
+  // missing pa's shape-param siblings pb/pc, added here.
+  const obj = {
+    level: 1, claim: 1, tau: 0.02, sync: 1, scaleBlend: 0.4, pitchMul: 1,
+    centerX: 0, centerY: 1.7, centerZ: 0, reach: 10, gain: 1,
+    tintR: 0.8, tintG: 0.2, tintB: 0.2, tintW: 1, imgW: 0,
+    kind: 3, pa: 0.5, pb: 0, pc: 0,
+    crV: 0, crW: 1, srV: 0, srW: 1,
+    smearV: 0.5, smearW: 0, asymV: 0, asymW: 0,
+  };
+  const Legacy = await loadEngine(new URL('../public/granular-legacy.js', import.meta.url));
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  const lag = Math.round(0.02 * 48000); // 960 samples at 1/tau
+  globalThis.currentTime = 0;
+  const legacy = render(new Legacy(), 4.0, { ...BASE_PARAMS, objects: [obj] }).L.slice(48000);
+  globalThis.currentTime = 0;
+  const mine = render(new Engine(), 4.0, {
+    ...BASE_PARAMS, objects: [obj], particleCount: 256, heroCount: 0,
+  }).L.slice(48000);
+  const acL = autocorrPeak(legacy, lag);
+  const acM = autocorrPeak(mine, lag);
+  assert.ok(acL > 0.08, `legacy autocorr ${acL} — test setup wrong if this fails`);
+  assert.ok(acM > 0.08, `bed autocorr ${acM} — order died in the tile`);
+});

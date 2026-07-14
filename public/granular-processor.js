@@ -295,9 +295,124 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const wFree = Math.sqrt(W) * p.fieldGain;
     const tEnd = tHop + BLOCK / sampleRate;
     const spat = this.bedSpat;
+    const anyObjects = p.objects.some((o) => o && o.level > 0.001);
+    const blockT = BLOCK / sampleRate;
     for (let k = 0; k < POOL; k++) {
       if (this.isHero[k]) continue;
       const v = this.voices[k];
+
+      // captured branch: a captured voice sings on its OBJECT's clock
+      // instead of free bursts, mirroring the hero path's captured ? : free
+      // split. Coherence rule: amplitude scales sqrt(W) at sync=0 (energy-
+      // correct — independent voices sum incoherently) to W at sync=1
+      // (amplitude-correct — synced voices share a real clock and their
+      // splats interfere constructively, so order becomes audible pitch).
+      if (anyObjects) this.evaluateCapture(v, tHop, spat);
+      else v.capOn = 0;
+      if (v.capOn) {
+        const o = p.objects[v.asg];
+        const wCap = (Math.sqrt(W) + (W - Math.sqrt(W)) * o.sync) * p.objectGain;
+        // every object cycle whose burst overlaps this block
+        let gO = Math.floor(tHop * v.asgInvTau + v.asgPhi);
+        const gOEnd = Math.floor(tEnd * v.asgInvTau + v.asgPhi);
+        for (; gO <= gOEnd; gO++) {
+          if (gO !== v.asgGen) {
+            // re-evaluate at the cycle's midpoint — the same reach/lottery
+            // test the hero path runs at each cycle boundary
+            this.evaluateCapture(v, (gO + 0.5 - v.asgPhi) / v.asgInvTau, spat);
+            if (!v.capOn) break;
+          }
+          const cycStart = (gO - v.asgPhi) / v.asgInvTau;
+          const cycLen = 1 / v.asgInvTau;
+          const bStart = cycStart;
+          const bLen = 0.6 * cycLen; // duty 0.6, matching the hero path's
+          // aa = (xO - asgGen) / 0.6
+
+          // same Gabor-true two-regime rendering as the free path below:
+          // a short burst IS a grain — one designated-hop splat carrying
+          // the full burst energy; a long burst spans hops — interior hops
+          // use the base (window-limited) kernel with COLA, edge slices use
+          // a duration-bucketed grain kernel recentered at the slice.
+          let amp;
+          let gker;
+          let shift = 0;
+          const envO = this.objEnvLUT[v.asg] || this.envLUT;
+          if (bLen < blockT) {
+            const pc = (bStart + bLen / 2 - tHop) * sampleRate;
+            if (pc < HOP / 2 || pc >= HOP / 2 + HOP) continue;
+            const envRMS = OceanTwinProcessor.envSegRMS(envO, 0, 1);
+            amp = v.capAmp * wCap * envRMS * Math.SQRT2
+              * Math.sqrt(bLen / blockT) * GRAIN_COLA * BED_CAL;
+            let bi = Math.round(Math.log2(bLen * sampleRate)) - GRAIN_LOG2_MIN;
+            if (bi < 0) bi = 0;
+            else if (bi >= GRAIN_BUCKETS.length) bi = GRAIN_BUCKETS.length - 1;
+            gker = this.grainKers[bi];
+            shift = pc - BLOCK / 2;
+          } else {
+            const s0 = Math.max(bStart, tHop);
+            const s1 = Math.min(bStart + bLen, tEnd);
+            if (s1 <= s0) continue;
+            const a0 = (s0 - bStart) / bLen;
+            const a1 = (s1 - bStart) / bLen;
+            const envRMS = OceanTwinProcessor.envSegRMS(envO, a0, a1);
+            const overlap = (s1 - s0) / blockT;
+            amp = v.capAmp * wCap * envRMS * Math.SQRT2 * Math.sqrt(overlap) * BED_CAL;
+            if (bStart <= tHop && bStart + bLen >= tEnd) {
+              gker = this.ker; // interior hop: window-limited, COLA carries env
+            } else {
+              let bi = Math.round(Math.log2((s1 - s0) * sampleRate)) - GRAIN_LOG2_MIN;
+              if (bi < 0) bi = 0;
+              else if (bi >= GRAIN_BUCKETS.length) bi = GRAIN_BUCKETS.length - 1;
+              gker = this.grainKers[bi];
+              const pc = ((s0 + s1) / 2 - tHop) * sampleRate;
+              shift = pc - BLOCK / 2;
+              amp *= this.win[Math.min(BLOCK - 1, pc | 0)] * GRAIN_COLA;
+            }
+          }
+          if (amp <= 0.0002) continue;
+          const bin = (v.capFreq * BLOCK) / sampleRate;
+          // REAL phase on the OBJECT timeline — the legacy captured
+          // oscillator's exact closed form. v.capPhase resets to 0 at each
+          // cycle's first rendered sample (evaluateCapture on assignment/
+          // cycle change) and free-runs from there until the next reset:
+          // the captured counterpart of the free path's slot-anchored
+          // phase above. anchor = the first sample time at/after cycStart,
+          // matching the per-sample engine's discretization exactly; −π/2
+          // turns the anchored sine into this splat's cosine convention.
+          // Synced voices (same object, same cycle) share this anchor, so
+          // their splats interfere constructively — order becomes pitch.
+          const anchor = Math.ceil(cycStart * sampleRate) / sampleRate;
+          const ph = (2 * Math.PI * v.capFreq * (tHop - anchor) - Math.PI / 2) % (2 * Math.PI);
+          // same two-wavetable 1/peak blend as the free path, on the
+          // captured recipe/timbre fields
+          const sat = v.capSat;
+          const tf = v.capTableFrac;
+          const invPA = this.wheelInvPeak[v.capTableA];
+          const invPB = this.wheelInvPeak[v.capTableB];
+          const fc = (1 - sat) + sat * ((1 - tf) * invPA + tf * invPB);
+          splatBlob(this.bedReL, this.bedImL, BLOCK, bin, amp * fc * v.capPanL, ph, gker, shift);
+          splatBlob(this.bedReR, this.bedImR, BLOCK, bin, amp * fc * v.capPanR, ph, gker, shift);
+
+          if (sat > 0.01) {
+            for (let side = 0; side < 2; side++) {
+              const rec = RECIPES[side === 0 ? v.capTableA : v.capTableB];
+              const w = sat * (side === 0 ? (1 - tf) * invPA : tf * invPB);
+              for (let q = 1; q < rec.length; q++) { // q=0 is the fundamental
+                const [hh, ha] = rec[q];
+                const fb = (v.capFreq * hh * BLOCK) / sampleRate;
+                if (fb >= BLOCK / 2 - KERNEL_HW) break;
+                const pa = amp * w * ha;
+                if (pa <= 0.000002) continue;
+                const php = (2 * Math.PI * v.capFreq * hh * (tHop - anchor) - Math.PI / 2) % (2 * Math.PI);
+                splatBlob(this.bedReL, this.bedImL, BLOCK, fb, pa * v.capPanL, php, gker, shift);
+                splatBlob(this.bedReR, this.bedImR, BLOCK, fb, pa * v.capPanR, php, gker, shift);
+              }
+            }
+          }
+        }
+        continue; // captured: skip the free-burst section
+      }
+
       const invLFree = (1 / p.tau) / (v.slotJitter * 1.8);
       // every free generation whose burst overlaps this block
       let g = Math.floor(tHop * invLFree + v.phi);

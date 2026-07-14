@@ -59,5 +59,20 @@ studio PC.
   train COHERENT, so the bed now computes that same closed-form
   slot-anchored phase instead of hash-random phases (salt 1201 retired;
   see report for the measurement that forced this).
-- Next: Task 6+ (objects into the bed), then hero selector.
+- Task 6 landed: captured (object-claimed) voices now render into the bed
+  too, on their OBJECT's clock instead of free bursts — same Gabor-true
+  grain-kernel machinery Task 5 built, same duty-0.6 cycle enumeration as
+  the hero path, weight `sqrt(W) + (W - sqrt(W))·sync` (energy-correct at
+  sync=0, amplitude-correct at sync=1). The phase is the REAL tone phase
+  on the object timeline (slot/cycle-anchored closed form, derived the
+  same way Task 5 derived the free path's — legacy's `capPhase` resets to
+  0 once per object-cycle, not per burst, so captured voices sharing an
+  object and a cycle are mutually coherent and interfere constructively:
+  order becomes audible pitch by interference, not by modeling). An
+  autocorrelation test against the frozen legacy engine (`tests/
+  engine.test.mjs`, "order: a synced object pulses at 1/tau in the bed")
+  is the arbiter; see `.superpowers/sdd/task-6-report.md` for the full
+  derivation and a captured-null sanity check (no objects → autocorr
+  ~0.002; any capture → ~0.97-0.99 in both engines alike).
+- Next: hero selector (Task 7+).
 - Supersedes Monika's local 64-voice patch (do not merge it).
