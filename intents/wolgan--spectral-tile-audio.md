@@ -149,5 +149,19 @@ studio PC.
   the new `PERF.md`: 9.3x realtime on Wolgan's desktop (Ryzen AI 9 HX
   370). Full run: 15/15 in `node --test "tests/*.test.mjs"`. Details in
   `.superpowers/sdd/task-9-report.md`.
+- Task 9 review fix: the probe's hero assertion was a tautology
+  (`voices >= 0`); now `0 < voices <= 48` — heroes must audibly exist in
+  the default scene. Re-running exposed a latent flake in the brief's
+  rumble check: its 20dB in-band-over-sub margin sits inside the healthy
+  engine's run-to-run variance (measured 16-25dB across five runs). A
+  bin-level diagnostic proved the sub-20Hz reading is NOT rumble — no DC
+  (offset 0.003 vs 0.0485 mean amplitude), no subsonic peak, just the
+  broadband skirt of short grain envelopes after the engine's 25Hz
+  one-pole output HP — so the probe now max-holds the spectrum over a 2s
+  window (both bands, fair comparison) and asserts a 12dB margin:
+  healthy measures 16-25dB, a real rumble bug measures ~0dB, 12
+  separates cleanly. Two consecutive PROBE PASS runs (margins
+  22.0/23.2dB, voices 30/28). Full derivation in the task-9 report's
+  fix-round section.
 - Next: understudy / further hero tuning, per the design doc's Stage 2.
 - Supersedes Monika's local 64-voice patch (do not merge it).
