@@ -183,12 +183,19 @@ studio PC.
   `--enable-unsafe-webgpu`, so the renderer ran its WebGL2 fallback path
   for this measurement (the same fallback CLAUDE.md requires Quest to
   keep working). Result: stable ~16.7ms avg/~19ms max at 131,072
-  particles, but wildly unstable 22-285ms avg/35-484ms max at 524,288
-  across five repeated runs with no code changes — fps stayed within
-  ~2% of the no-probe baseline throughout (the readback is genuinely
-  async, not frame-blocking), so it's the round-trip cost itself, not
-  render time, that fails the gate. **NO-GO on this backend**: even the
-  best case is 2x over the 8ms ceiling. Recorded in `PERF.md` under
+  particles, but wildly unstable 22-417ms avg/35-613ms max at 524,288
+  across six repeated runs with no code changes — fps stayed within
+  the 5% band of the no-probe baseline throughout (the readback is
+  essentially async, not frame-blocking), so it's the round-trip cost
+  itself, not render time, that fails the gate. **NO-GO on this
+  backend**: even the best case is 2x over the 8ms ceiling. Review fix
+  round: the readback promise now returns its queue slot in
+  `.finally()` and counts rejections into a visible ` err N` suffix on
+  the stats line — before, three rejections (context loss, driver
+  reset, lost XR session; realistic on Quest) would permanently close
+  the in-flight cap and freeze the overlay at its last GOOD value,
+  making a failing path read as passing on the very line the GO/NO-GO
+  decision trusts. Recorded in `PERF.md` under
   "Readback probe (stage-2 gate)"; the Quest row is still "(fill in)" —
   a true WebGPU reading (desktop or Quest) is needed before Stage 2 is
   ruled out entirely, since this result is specific to the WebGL2 path.

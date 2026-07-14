@@ -39,22 +39,23 @@ the same fallback path Quest may need (see CLAUDE.md), and
 (shared `Renderer.js`/`RenderObject.js` code path — confirmed by reading
 `node_modules/three@0.185.1` source, not assumed).
 
-At 131,072 particles the reading was stable across five separate runs
-(avg 16.7-16.8ms, max 18.4-19.0ms, queue depth 1). At 524,288 particles
-the reading was highly unstable run-to-run: avg ranged 21.6-285.2ms,
-max 34.9-484.4ms (queue depth 1-2), across five runs with no code or
-scene changes between them — the async readback cost itself is not
-just above budget but non-deterministic under this backend. fps stayed
-essentially unchanged with the probe active in every run (+0.3% to
-+2.6% vs. the no-probe baseline at the same count; never a regression),
-confirming the probe is genuinely async and does not stall the render
-loop — it is the readback latency itself, not frame time, that fails
-the gate.
+At 131,072 particles the reading was stable across six separate runs
+(avg 16.7-16.8ms, max 18.4-19.0ms, queue depth 1, fps +2.0% to +2.6%).
+At 524,288 particles the reading was highly unstable run-to-run: avg
+ranged 21.6-417.1ms, max 34.9-612.5ms (queue depth 1-2), across six
+runs with no code or scene changes between them — the async readback
+cost itself is not just above budget but non-deterministic under this
+backend. fps stayed within the 5% band with the probe active in every
+run (+2.6% to -4.5% vs. the no-probe baseline at the same count; the
+one dip coincided with the worst 417ms-avg readback run), confirming
+the readback is essentially async and does not stall the render loop
+outright — it is the readback latency itself, not frame time, that
+fails the gate.
 
 | machine | backend | particles | avg ms | max ms | fps Δ |
 |---|---|---|---|---|---|
 | Wolgan desktop (Ryzen AI 9 HX 370 / Radeon 890M) | WebGL2 (fallback; no `navigator.gpu` in this Chromium) | 131,072 | 16.7 | 19.0 | +2.3% |
-| Wolgan desktop (Ryzen AI 9 HX 370 / Radeon 890M) | WebGL2 (fallback; no `navigator.gpu` in this Chromium) | 524,288 | 22.6 (21.6-285.2 across runs) | 34.9 (34.9-484.4 across runs) | +2.0% |
+| Wolgan desktop (Ryzen AI 9 HX 370 / Radeon 890M) | WebGL2 (fallback; no `navigator.gpu` in this Chromium) | 524,288 | 22.6 (21.6-417.1 across runs) | 34.9 (34.9-612.5 across runs) | +2.0% (to -4.5% worst run) |
 | (fill in) | | | | | |
 
 **GO/NO-GO on this desktop (WebGL2 fallback): NO-GO.** Even the best

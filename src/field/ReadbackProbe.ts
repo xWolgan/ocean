@@ -18,7 +18,7 @@ export class ReadbackProbe {
   private renderer: THREE.WebGPURenderer;
   private pending = 0;
   private times: number[] = [];
-  private frames = 0;
+  private errors = 0;
   stats = 'readback  warming up';
 
   constructor(renderer: THREE.WebGPURenderer, count: number) {
@@ -44,7 +44,6 @@ export class ReadbackProbe {
   }
 
   update(): void {
-    this.frames++;
     const prevRT = this.renderer.getRenderTarget();
     this.renderer.setRenderTarget(this.rt);
     this.renderer.render(this.scene, this.cam);
@@ -52,14 +51,32 @@ export class ReadbackProbe {
     if (this.pending < 3) {
       this.pending++;
       const t0 = performance.now();
-      void this.renderer.readRenderTargetPixelsAsync(this.rt, 0, 0, 32, 8).then(() => {
-        this.times.push(performance.now() - t0);
-        this.pending--;
-        if (this.times.length > 90) this.times.shift();
-        const avg = this.times.reduce((a, b) => a + b, 0) / this.times.length;
-        const max = Math.max(...this.times);
-        this.stats = `readback  avg ${avg.toFixed(1)}ms max ${max.toFixed(1)}ms q${this.pending}`;
-      });
+      // A rejection (context loss, driver reset, lost XR session — all
+      // realistic on the Quest this probe exists to test) must still
+      // reopen the queue and must read as FAILING, never as stale-good:
+      // this line is a trusted live GO/NO-GO signal.
+      void this.renderer
+        .readRenderTargetPixelsAsync(this.rt, 0, 0, 32, 8)
+        .then(() => {
+          this.times.push(performance.now() - t0);
+          if (this.times.length > 90) this.times.shift();
+        })
+        .catch(() => {
+          this.errors++;
+        })
+        .finally(() => {
+          this.pending--;
+          this.refreshStats();
+        });
     }
+  }
+
+  private refreshStats(): void {
+    const n = this.times.length;
+    const avg = n ? this.times.reduce((a, b) => a + b, 0) / n : Number.NaN;
+    const max = n ? Math.max(...this.times) : Number.NaN;
+    this.stats =
+      `readback  avg ${avg.toFixed(1)}ms max ${max.toFixed(1)}ms q${this.pending}` +
+      (this.errors > 0 ? ` err ${this.errors}` : '');
   }
 }
