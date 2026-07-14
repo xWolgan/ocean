@@ -14,7 +14,7 @@ import { CompositorAids } from './ui/CompositorAids';
 
 const bus = new ModulationBus();
 const objects = new ObjectManager();
-const settings = { particleCount: 1 << 17 };
+const settings = { particleCount: 1 << 17, voices: 256 };
 
 const renderer = new THREE.WebGPURenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -113,7 +113,7 @@ let statsTimer = 0;
 
 // dev hook for automated verification and console experiments
 Object.assign(window, {
-  __ocean: { bus, objects, state: bus.out, audio, renderer, get field() { return field; } },
+  __ocean: { bus, objects, state: bus.out, audio, renderer, settings, get field() { return field; } },
   __oceanSetCount: setParticleCount,
 });
 console.log('[ocean] backend:', renderer.backend.constructor.name);
@@ -154,7 +154,10 @@ renderer.setAnimationLoop((now: number) => {
   field.update(bus.out, tSec, dt);
   field.updateObjects(objects, bus.out.scale);
   aids.update(interaction, objects, tSec);
-  audio.update(bus.out, camera, tSec, field.sonicStride, objects);
+  // stride spreads the voice sample across the whole field, whatever
+  // the voice count — fewer voices sample the same ocean more coarsely
+  const sonicStride = Math.max(1, Math.floor(field.count / settings.voices));
+  audio.update(bus.out, camera, tSec, sonicStride, settings.voices, objects);
   controls.update();
 
   renderer.render(scene, camera);

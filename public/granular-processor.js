@@ -4,7 +4,9 @@
  * The visual field is a stateless stochastic process: particle i in
  * generation g flashes at a hash-derived position for tau*(0.5+hash(i))
  * seconds. This worklet evaluates the SAME function (same PCG hashes,
- * same clock) sample-accurately for a strided sample of 256 particles.
+ * same clock) sample-accurately for a strided sample of up to 256
+ * particles (`voices` param — weak CPUs starve at 256 and go silent;
+ * fewer voices sample the same ocean more coarsely).
  *
  * The content of every grain is a PURE SINE — plus secondary tones
  * mapped from the particle's color, dimension by dimension:
@@ -21,7 +23,7 @@
  * cluster (chord of their own sizes) pulsing at the fundamental 1/tau.
  */
 
-const VOICES = 256;
+const MAX_VOICES = 256;
 const REPORT_INTERVAL_BLOCKS = 40;
 const TABLE_SIZE = 2048;
 const TABLE_MASK = TABLE_SIZE - 1;
@@ -173,6 +175,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       boundsMin: [-3, 0, -3],
       boundsSize: [6, 3, 6],
       stride: 512,
+      voices: MAX_VOICES,
       // 8 object descriptors: {level, claim, tau, sync, registerHz,
       // centerX, centerY, centerZ, reach}
       objects: [],
@@ -214,10 +217,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
   }
 
   ensureVoices() {
-    if (this.voices.length === VOICES && this.builtStride === this.p.stride) return;
+    const n = Math.min(MAX_VOICES, Math.max(1, this.p.voices | 0));
+    if (this.voices.length === n && this.builtStride === this.p.stride) return;
     this.builtStride = this.p.stride;
     this.voices = [];
-    for (let k = 0; k < VOICES; k++) this.voices.push(new Voice(k * this.p.stride));
+    for (let k = 0; k < n; k++) this.voices.push(new Voice(k * this.p.stride));
     this.paramsDirty = true;
   }
 
@@ -263,7 +267,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         p.asymmetry + (o.asymV - p.asymmetry) * o.asymW,
       );
     }
-    for (let k = 0; k < VOICES; k++) {
+    for (let k = 0; k < this.voices.length; k++) {
       const v = this.voices[k];
       // the particle's actual color: mix(tint, per-particle random, colorRandom)
       const cr = p.colorRandom;
@@ -541,7 +545,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     let active = 0;
 
     const anyObjects = p.objects.some((o) => o && o.level > 0.001);
-    for (let k = 0; k < VOICES; k++) {
+    for (let k = 0; k < this.voices.length; k++) {
       const v = this.voices[k];
       // free slots are 1.8x tau (burst + silent gap), matching the GPU
       const invLFree = invTau / (v.slotJitter * 1.8);

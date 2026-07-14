@@ -14,6 +14,16 @@ export const PARTICLE_COUNTS: Record<string, number> = {
   '1M': 1 << 20,
 };
 
+// audio voices are a strided sample of the particles; fewer voices =
+// proportionally less worklet CPU (weak machines starve at 256 and
+// go silent), same ocean character
+export const VOICE_COUNTS: Record<string, number> = {
+  '32': 32,
+  '64': 64,
+  '128': 128,
+  '256': 256,
+};
+
 /** The compositor's front panel: ambient substance (the environment's
  *  tuning) + the objects (the instruments), + scene save/load. */
 export function createPanel(
@@ -22,7 +32,7 @@ export function createPanel(
   objects: ObjectManager,
   aids: CompositorAids,
   controls: OrbitControls,
-  settings: { particleCount: number },
+  settings: { particleCount: number; voices: number },
   onParticleCountChange: (count: number) => void,
 ): GUI {
   const gui = new GUI({ title: 'OCEAN — compositor' });
@@ -244,6 +254,7 @@ export function createPanel(
     .add(settings, 'particleCount', PARTICLE_COUNTS)
     .name('particles')
     .onChange((v: number) => onParticleCountChange(v));
+  perf.add(settings, 'voices', VOICE_COUNTS).name('audio voices');
   perf.close();
 
   const audio = gui.addFolder('audio');

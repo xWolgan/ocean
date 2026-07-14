@@ -68,12 +68,14 @@ export class AudioEngine {
    * Stream control state; internally throttled to ~60 Hz.
    * @param tSec   the app clock also driving the GPU field
    * @param stride particle index step between sonic samples
+   * @param voices worklet voice count (≤256); fewer = less audio CPU
    */
   update(
     state: FieldState,
     camera: THREE.Camera,
     tSec: number,
     stride: number,
+    voices: number,
     objects: ObjectManager,
   ): void {
     if (!this.node || !this.ctx) return;
@@ -131,6 +133,7 @@ export class AudioEngine {
           FIELD_HALF_EXTENTS.z * 2,
         ],
         stride,
+        voices,
         objects: objects.audioDescriptors(state.scale),
       },
     });
