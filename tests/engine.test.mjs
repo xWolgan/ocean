@@ -262,6 +262,98 @@ test('bed/hero crossfade is complementary: no energy dug out at moderate weight'
   assert.ok(Math.abs(db) < 0.4, `crossfade leaked ${db.toFixed(3)} dB at W=16`);
 });
 
+function xcorrPeak(a, b, maxLag) {
+  // normalized cross-correlation peak of a vs b over lags -maxLag..maxLag
+  let ea = 0, eb = 0;
+  for (let i = 0; i < a.length; i++) ea += a[i] * a[i];
+  for (let i = 0; i < b.length; i++) eb += b[i] * b[i];
+  const norm = Math.sqrt(ea * eb) || 1;
+  let bestLag = 0, bestC = -2;
+  for (let lag = -maxLag; lag <= maxLag; lag++) {
+    let c = 0;
+    const i0 = Math.max(0, -lag);
+    const i1 = Math.min(a.length, b.length - lag);
+    for (let i = i0; i < i1; i++) c += a[i] * b[i + lag];
+    c /= norm;
+    if (c > bestC) { bestC = c; bestLag = lag; }
+  }
+  return { lag: bestLag, corr: bestC };
+}
+
+test('live ordering: bed and heroes share one clock after a late, large timeOffset', async () => {
+  // Reproduces the LIVE session ordering every other test skips: the
+  // worklet runs ~20 process() quanta BEFORE the first params message
+  // (audio starts on the user gesture; the first RAF-driven params send
+  // lands later), and that first message carries the real
+  // timeOffset = tSec - ctx.currentTime, always far above the 50ms hard-
+  // resync threshold. The hero clock (t0 = currentTime + smoothOffset)
+  // jumps at that resync; bedTime must jump WITH it, and every later
+  // slew tick must move both — otherwise the bed rides a permanently
+  // offset clock (regression: bedTime was anchored once on the first
+  // process() call and never followed smoothOffset again).
+  //
+  // Two deliberate deviations from the naive setup, both forced by
+  // measurement on the pre-fix engine:
+  //  - timeOffset 3.713, NOT a multiple of tau: 3.7 = 185·tau exactly,
+  //    and a synced object's pulse train is tau-periodic, so a bed
+  //    offset by a whole number of cycles still correlated 0.96 with
+  //    legacy — the wrong clock hid inside the periodicity.
+  //  - claim 0.7, not 1: the per-cycle capture lottery makes each
+  //    cycle's on/off pattern depend on the cycle INDEX g, so content
+  //    differs across clocks; the constant capture flips also keep the
+  //    hero set churning, which keeps promotion/crossfade machinery
+  //    exercised in the measured tail (the shared-cursor bug lived
+  //    exactly there).
+  const obj = {
+    level: 1, claim: 0.7, tau: 0.02, sync: 1, scaleBlend: 0.4, pitchMul: 1,
+    centerX: 0, centerY: 1.7, centerZ: 0, reach: 10, gain: 1,
+    tintR: 0.8, tintG: 0.2, tintB: 0.2, tintW: 1, imgW: 0,
+    kind: 3, pa: 0.5, pb: 0, pc: 0,
+    crV: 0, crW: 1, srV: 0, srW: 1,
+    smearV: 0.5, smearW: 0, asymV: 0, asymW: 0,
+  };
+  const liveRender = (Engine, heroCount) => {
+    globalThis.currentTime = 0;
+    const proc = new Engine();
+    for (let q = 0; q < 20; q++) { // live ordering: quanta before params
+      proc.process([], [[new Float32Array(128), new Float32Array(128)]]);
+      globalThis.currentTime += 128 / 48000;
+    }
+    return render(proc, 3.0, {
+      ...BASE_PARAMS, objects: [obj], particleCount: 256, heroCount, timeOffset: 3.713,
+    }).L.slice(-48000); // 1s tail, well after resync + hero fades settle
+  };
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  const Legacy = await loadEngine(new URL('../public/granular-legacy.js', import.meta.url));
+  const A = liveRender(Engine, 0); // pure bed
+  const B = liveRender(Engine, 32); // hero + bed mix, identical ordering
+  const R = liveRender(Legacy, 0); // per-sample reference on the app clock
+  // (1) the bed is on the app clock: cross-correlation against the legacy
+  // reference peaks at ~lag 0, strongly positive. Calibrated: healthy
+  // 0.937 at lag 4; the pre-fix bed peaked at lag 340 (its true offset
+  // mod the pulse period) with the best in-window value NEGATIVE (-0.45).
+  const ar = xcorrPeak(A, R, 512);
+  assert.ok(Math.abs(ar.lag) <= 16 && ar.corr > 0.5,
+    `bed off the app clock: peak ${ar.corr.toFixed(3)} at lag ${ar.lag}`);
+  // (2) heroes and bed are the same signal: the hero mix stays aligned
+  // and coherent with the pure bed. Calibrated: healthy 0.9985 at lag 0.
+  const ab = xcorrPeak(A, B, 512);
+  assert.ok(Math.abs(ab.lag) <= 16 && ab.corr > 0.9,
+    `hero mix decoheres from bed: peak ${ab.corr.toFixed(3)} at lag ${ab.lag}`);
+  // (3) the sharp guard for the shared-cursor bug: what heroes add must
+  // be what the bed removed, so the residual energy of (B - A) is tiny.
+  // Calibrated: 0.0035 healthy; 0.0134 with fillBed still mutating hero
+  // Voice state (phases clobbered during crossfades); 0.0347 pre-fix.
+  let eD = 0, eA = 0;
+  for (let i = 0; i < A.length; i++) {
+    const d = B[i] - A[i];
+    eD += d * d;
+    eA += A[i] * A[i];
+  }
+  const resid = eD / (eA || 1);
+  assert.ok(resid < 0.008, `bed/hero handoff leaks: residual ${resid.toFixed(4)}`);
+});
+
 test('throughput: worklet renders faster than 4x realtime under load', async () => {
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
   globalThis.currentTime = 0;
