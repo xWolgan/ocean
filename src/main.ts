@@ -97,16 +97,14 @@ function applyMovement(dt: number): void {
 
 document.body.appendChild(XRButton.createButton(renderer));
 
-// browsers require a user gesture before audio may start
+// browsers require a user gesture before audio may start; RETRY on every
+// click until it actually runs (a failed first attempt must not consume
+// the only chance — that made failures permanently silent)
 const hint = document.getElementById('hint')!;
-window.addEventListener(
-  'pointerdown',
-  () => {
-    void audio.start();
-    hint.style.opacity = '0';
-  },
-  { once: true },
-);
+window.addEventListener('pointerdown', () => {
+  if (!audio.running) void audio.start();
+  hint.style.opacity = '0';
+});
 
 // --- stats overlay ---
 const statsEl = document.getElementById('stats')!;

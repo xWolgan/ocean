@@ -25,6 +25,8 @@ export class AudioEngine {
 
   /** Latest audible voice count reported by the worklet, for the overlay. */
   voiceCount = 0;
+  /** Human-readable engine state for the overlay (remote debugging). */
+  status = 'off (click to start)';
 
   get running(): boolean {
     return this.ctx !== null && this.ctx.state === 'running';
