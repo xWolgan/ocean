@@ -215,6 +215,54 @@ studio PC.
   `node --check public/granular-processor.js` (legacy engine keeps its
   `node --check`).
 
+- Final review (whole branch) found two CRITICALs, both foreign-clock
+  violations invisible to the offline tests because the harness sends
+  params before the first `process()` call — the opposite of a live
+  session. Both fixed:
+  1. **The bed never joined the app clock.** `bedTime` was anchored once
+     on the first `process()` and then only ever advanced by
+     `HOP/sampleRate` — but live, the first params message (carrying the
+     real `timeOffset`, always ≫50 ms) lands several quanta later, so
+     the hero clock hard-resynced while the bed kept its dead-reckoned
+     anchor: bed and heroes permanently seconds apart. Now every
+     `smoothOffset` change (hard resync AND slew) applies the same delta
+     to `bedTime`; the ≤512-sample ring tail synthesized on the old
+     timeline is deliberately left to play out (one-time, ≤11 ms, at
+     session start). Measurement that found the hiding place: with
+     `timeOffset` an exact multiple of a synced object's tau, the wrong
+     clock is INVISIBLE (pulse train is tau-periodic, corr 0.96 vs
+     legacy); the new regression test uses 3.713 s, a non-multiple.
+  2. **fillBed and the hero loop fought over shared Voice cursors.**
+     fillBed's cursor runs up to ~1536 samples ahead of the hero loop's
+     t0; during every crossfade both renderers processed the SAME Voice —
+     fillBed advanced `v.gen`/`v.asgGen` and reset `v.phase`/`v.capPhase`
+     to 0, the hero loop re-refreshed backward, resetting the running
+     oscillator mid-burst. Now each Voice carries a bed-owned derivation
+     struct (`v.bed`, constructor-allocated); `refreshFreeGeneration`/
+     `evaluateCapture` take an explicit write target (Voice on the hero
+     path — bit-exact, guarded by the null/autocorr tests — `v.bed` on
+     the bed path); `selectHeroes` reads scoring inputs from dedicated
+     `scoreAmp`/`scoreCapOn` arrays recorded by whichever renderer owns
+     the voice; and at promotion the hero's oscillator phases are set in
+     CLOSED FORM from the slot/cycle anchor (the same closed form the
+     bed splats), so a rising hero is phase-continuous with the bed it
+     crossfades against.
+  New regression test ("live ordering: bed and heroes share one clock
+  after a late, large timeOffset", `tests/engine.test.mjs`): 20 quanta
+  before params, then `timeOffset` 3.713 s; asserts bed-vs-legacy xcorr
+  peak at ~lag 0 (pre-fix: peak at lag 340, in-window best −0.45;
+  post-fix: 0.937 at lag 4), hero-mix-vs-bed coherence at lag 0, and a
+  residual-energy guard `E(B−A)/E(A) < 0.008` calibrated at 0.0035
+  healthy / 0.0134 with only the clock fixed (cursor fight isolated) /
+  0.0347 pre-fix. Also from the review: non-Chromium browsers whose
+  AudioWorklet can't load ES-module imports now degrade gracefully —
+  `AudioEngine.start()` retries ONCE with `granular-legacy.js` and
+  reports `running (legacy engine — reduced voices)`; the worklet header
+  now describes the three real renderers (the "understudy" phrasing is
+  gone), the rumble-blocker comment says 25 Hz like its coefficient, and
+  SPEC.md calls the hero crossfade what it is (complementary linear, not
+  equal-power). Full evidence: `.superpowers/sdd/final-fix-report.md`.
+
 ## State: Stage 1 — complete
 
 Stage 1 (heroes + spectral-tile bed, replacing 256-voice per-sample

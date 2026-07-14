@@ -151,9 +151,10 @@ for the full design and its execution history):
   amplitude, a ~300 ms capture/release-transition boost, and 1.25×
   hysteresis for the incumbent set — rendered sample-accurately by the
   legacy per-voice oscillator, bit-exact with the GPU. Promotion/demotion
-  is an 80 ms equal-power linear crossfade with the bed, complementary
-  (bed renders each voice at `1 − heroGain`) so the two never sum to more
-  or less than one voice's energy.
+  is an 80 ms complementary linear crossfade with the bed (bed renders
+  each voice at `1 − heroGain`; linear complements, not equal-power,
+  because bed and hero render nearly the same signal) so the two never
+  sum to more or less than one voice's energy.
 - **The spectral-tile bed**: every non-hero pool voice, rendered as a
   1024-bin complex spectrum (512-sample hop, Hann-windowed overlap-add,
   one IFFT per hop per ear) instead of per-sample synthesis. This is NOT
