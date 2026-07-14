@@ -1,6 +1,15 @@
 /**
  * OCEAN twin-scheduler engine — the substance, audible rendering.
  *
+ * Three renderers share the pool of 256 hash-derived particle voices:
+ *   - heroes: a small selected subset, still rendered sample-accurately
+ *     by the per-voice loop below (the "instruments").
+ *   - tile bed: the mass of the pool, rendered as a spectral tile —
+ *     one IFFT/overlap-add hop per ear renders many voices at once as
+ *     windowed-tone blobs splatted into a shared spectrum.
+ *   - understudy: (future) a lightweight stand-in for voices not
+ *     currently promoted to hero.
+ *
  * The visual field is a stateless stochastic process: particle i in
  * generation g flashes at a hash-derived position for tau*(0.5+hash(i))
  * seconds. This worklet evaluates the SAME function (same PCG hashes,
@@ -21,22 +30,15 @@
  * cluster (chord of their own sizes) pulsing at the fundamental 1/tau.
  */
 
-const VOICES = 256;
+import {
+  pcg, h2, BLOCK, HOP, makeFFT, hannWindow, makeKernel, splatBlob,
+} from './dsp.js';
+
+const POOL = 256;
 const REPORT_INTERVAL_BLOCKS = 40;
 const TABLE_SIZE = 2048;
 const TABLE_MASK = TABLE_SIZE - 1;
 const ENV_LUT_SIZE = 512;
-
-function pcg(n) {
-  const state = (Math.imul(n, 747796405) + 2891336453) >>> 0;
-  const word = Math.imul((state >>> ((state >>> 28) + 4)) ^ state, 277803737) >>> 0;
-  return (((word >>> 22) ^ word) >>> 0) / 4294967296;
-}
-
-// 2D hash over (particle, generation, salt) — must match the GPU shader
-function h2(i, g, salt) {
-  return pcg((Math.imul(i, 1009) + Math.imul(g, 9176) + salt) >>> 0);
-}
 
 /** The timbre wheel: harmonic recipes around the hue circle. */
 const RECIPES = [
@@ -199,6 +201,29 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.limEnv = 0;
     this.limRelease = Math.exp(-1 / (0.25 * sampleRate));
 
+    // --- spectral-tile bed (one IFFT per hop per ear renders the mass) ---
+    this.fftEngine = makeFFT(BLOCK);
+    this.win = hannWindow(BLOCK);
+    this.ker = makeKernel(this.win);
+    this.bedReL = new Float32Array(BLOCK);
+    this.bedImL = new Float32Array(BLOCK);
+    this.bedReR = new Float32Array(BLOCK);
+    this.bedImR = new Float32Array(BLOCK);
+    this.olaL = new Float32Array(HOP); // previous block's tail
+    this.olaR = new Float32Array(HOP);
+    this.ringL = new Float32Array(4096);
+    this.ringR = new Float32Array(4096);
+    this.ringRead = 0;
+    this.ringWrite = 0;
+    this.bedTime = null; // app-clock time of the next hop's first sample
+    this.testTone = null; // harness hook: {freq, amp} until Task 5 replaces it
+    // hero mask: zero until Task 7's selector fills it. From THIS task on,
+    // the per-sample voice loop renders ONLY hero-masked voices — the
+    // sample-accurate rendering of all 256 pool voices ends here (the bed
+    // takes over as the mass in Tasks 5-6; without this gate the null
+    // tests would hear everything twice).
+    this.isHero = new Uint8Array(POOL);
+
     this.port.onmessage = (e) => {
       if (e.data.type === 'params') {
         Object.assign(this.p, e.data.data);
@@ -209,15 +234,45 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         // full constellations: the worklet samples per-generation targets
         // itself, with the same hashes as the GPU (deterministic twins)
         this.clouds = e.data.data;
+      } else if (e.data.type === 'testTone') {
+        this.testTone = e.data.data;
       }
     };
   }
 
+  /** Bed content for the hop starting at app-time tHop. Tasks 5-6 fill
+   *  this with the pool; Task 4 ships a single test blob. */
+  fillBed(tHop) {
+    if (!this.testTone) return;
+    const f = this.testTone.freq;
+    const bin = (f * BLOCK) / sampleRate;
+    const ph = (2 * Math.PI * f * tHop) % (2 * Math.PI);
+    splatBlob(this.bedReL, this.bedImL, BLOCK, bin, this.testTone.amp, ph, this.ker);
+    splatBlob(this.bedReR, this.bedImR, BLOCK, bin, this.testTone.amp, ph, this.ker);
+  }
+
+  synthesizeHop() {
+    this.bedReL.fill(0); this.bedImL.fill(0);
+    this.bedReR.fill(0); this.bedImR.fill(0);
+    this.fillBed(this.bedTime);
+    this.fftEngine.ifft(this.bedReL, this.bedImL);
+    this.fftEngine.ifft(this.bedReR, this.bedImR);
+    const m = this.ringL.length - 1; // 4096 is a power of two
+    for (let i = 0; i < HOP; i++) {
+      this.ringL[(this.ringWrite + i) & m] = this.olaL[i] + this.bedReL[i];
+      this.ringR[(this.ringWrite + i) & m] = this.olaR[i] + this.bedReR[i];
+      this.olaL[i] = this.bedReL[i + HOP];
+      this.olaR[i] = this.bedReR[i + HOP];
+    }
+    this.ringWrite += HOP;
+    this.bedTime += HOP / sampleRate;
+  }
+
   ensureVoices() {
-    if (this.voices.length === VOICES && this.builtStride === this.p.stride) return;
+    if (this.voices.length === POOL && this.builtStride === this.p.stride) return;
     this.builtStride = this.p.stride;
     this.voices = [];
-    for (let k = 0; k < VOICES; k++) this.voices.push(new Voice(k * this.p.stride));
+    for (let k = 0; k < POOL; k++) this.voices.push(new Voice(k * this.p.stride));
     this.paramsDirty = true;
   }
 
@@ -263,7 +318,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         p.asymmetry + (o.asymV - p.asymmetry) * o.asymW,
       );
     }
-    for (let k = 0; k < VOICES; k++) {
+    for (let k = 0; k < POOL; k++) {
       const v = this.voices[k];
       // the particle's actual color: mix(tint, per-particle random, colorRandom)
       const cr = p.colorRandom;
@@ -531,8 +586,19 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       this.smoothOffset += Math.max(-5e-5, Math.min(5e-5, d));
     }
 
-    const invTau = 1 / p.tau;
     const t0 = currentTime + this.smoothOffset;
+
+    // --- the mass: pull bed samples from the OLA ring ---
+    if (this.bedTime === null) this.bedTime = t0;
+    while (this.ringWrite - this.ringRead < n) this.synthesizeHop();
+    const mRing = this.ringL.length - 1;
+    for (let s = 0; s < n; s++) {
+      outL[s] = this.ringL[(this.ringRead + s) & mRing];
+      outR[s] = this.ringR[(this.ringRead + s) & mRing];
+    }
+    this.ringRead += n;
+
+    const invTau = 1 / p.tau;
     const dt = 1 / sampleRate;
     const envLUT = this.envLUT;
     const objEnvLUT = this.objEnvLUT;
@@ -541,7 +607,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     let active = 0;
 
     const anyObjects = p.objects.some((o) => o && o.level > 0.001);
-    for (let k = 0; k < VOICES; k++) {
+    for (let k = 0; k < POOL; k++) {
+      if (!this.isHero[k]) continue; // pool voices live in the bed now
       const v = this.voices[k];
       // free slots are 1.8x tau (burst + silent gap), matching the GPU
       const invLFree = invTau / (v.slotJitter * 1.8);
