@@ -266,6 +266,14 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.port.onmessage = (e) => {
       if (e.data.type === 'params') {
         Object.assign(this.p, e.data.data);
+        // floor object tau at ingestion, mirroring the GPU's clamp in
+        // ParticleField.ts (`C.x.max(0.0005)`) — the deterministic-twins
+        // invariant: the audio side was missing the floor. (The frozen
+        // legacy engine still lacks it, which only matters at settings
+        // where legacy already diverged from the GPU.)
+        for (const o of this.p.objects) {
+          if (o) o.tau = Math.max(o.tau, 0.0005);
+        }
         this.paramsDirty = true;
       } else if (e.data.type === 'audioImages') {
         this.audioImages = e.data.data;
@@ -317,12 +325,14 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         // mid-block handoff to a DIFFERENT object (different tau/sync)
         // rebases them — mixing the old counter with the new params would
         // render a burst at no real cycle boundary. Iterations are capped
-        // (64 cycles per 21ms block is beyond any real tau) so a
-        // pathological reassignment ping-pong can't spin.
+        // so a pathological reassignment ping-pong can't spin: with the
+        // ingestion tau floor (0.0005s, mirroring the GPU clamp) the worst
+        // real case is 21.33ms/0.0005 ≈ 43 cycles per block, so 128 is
+        // ~3× margin over the floored minimum.
         let gO = Math.floor(tHop * v.asgInvTau + v.asgPhi);
         let gOEnd = Math.floor(tEnd * v.asgInvTau + v.asgPhi);
         let iter = 0;
-        for (; gO <= gOEnd && ++iter <= 64; gO++) {
+        for (; gO <= gOEnd && ++iter <= 128; gO++) {
           if (gO !== v.asgGen) {
             // re-evaluate at the cycle's midpoint — the same reach/lottery
             // test the hero path runs at each cycle boundary

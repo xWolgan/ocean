@@ -147,3 +147,32 @@ test('handoff smoke: two objects with different tau trade voices without blowing
   rms = Math.sqrt(rms / L.length);
   assert.ok(rms > 1e-4, `handoff render rms ${rms} — captured bed went silent`);
 });
+
+test('tau floor: an object below the GPU clamp (0.0005s) stays finite and audible', async () => {
+  // tau 0.00025 is UI-reachable (lifespanToTau floor 1ms / 2^octave,
+  // octave up to +2) but below the GPU's tau clamp of 0.0005
+  // (ParticleField.ts `C.x.max(0.0005)`). The worklet now floors o.tau at
+  // params ingestion to match the GPU (deterministic twins) — this also
+  // keeps the captured-bed cycle enumeration under its iteration cap
+  // (≈43 cycles/block at the floor, cap 128).
+  const obj = {
+    level: 1, claim: 1, tau: 0.00025, sync: 1, scaleBlend: 0.4, pitchMul: 1,
+    centerX: 0, centerY: 1.7, centerZ: 0, reach: 10, gain: 1,
+    tintR: 0.8, tintG: 0.2, tintB: 0.2, tintW: 1, imgW: 0,
+    kind: 3, pa: 0.5, pb: 0, pc: 0,
+    crV: 0, crW: 1, srV: 0, srW: 1,
+    smearV: 0.5, smearW: 0, asymV: 0, asymW: 0,
+  };
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  globalThis.currentTime = 0;
+  const { L, R } = render(new Engine(), 1.0, {
+    ...BASE_PARAMS, objects: [obj], particleCount: 256, heroCount: 0,
+  });
+  let rms = 0;
+  for (let i = 0; i < L.length; i++) {
+    assert.ok(Number.isFinite(L[i]) && Number.isFinite(R[i]), `non-finite sample at ${i}`);
+    rms += L[i] * L[i];
+  }
+  rms = Math.sqrt(rms / L.length);
+  assert.ok(rms > 1e-4, `tau-floor render rms ${rms} — sub-floor object went silent`);
+});
