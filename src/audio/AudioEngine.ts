@@ -35,42 +35,75 @@ export class AudioEngine {
   }
 
   async start(): Promise<void> {
-    try {
-      if (this.ctx) {
+    if (this.ctx) {
+      try {
         if (this.ctx.state === 'suspended') await this.ctx.resume();
         this.status = this.ctx.state;
-        return;
+      } catch (err) {
+        this.status = `FAILED: ${err instanceof Error ? err.message : String(err)}`;
+        this.reset();
       }
-      this.ctx = new AudioContext({ latencyHint: 'interactive' });
-      // ?audio=legacy loads the frozen pre-tile engine for A/B comparison
-      const engineFile =
-        new URLSearchParams(location.search).get('audio') === 'legacy'
-          ? 'granular-legacy.js'
-          : 'granular-processor.js';
-      await this.ctx.audioWorklet.addModule(
-        `${import.meta.env.BASE_URL}${engineFile}`,
-      );
-      this.node = new AudioWorkletNode(this.ctx, 'ocean-granular', {
-        numberOfInputs: 0,
-        numberOfOutputs: 1,
-        outputChannelCount: [2],
-      });
-      this.node.port.onmessage = (e) => {
-        if (e.data.type === 'stats') {
-          this.voiceCount = e.data.grains;
-          this.bedCount = e.data.bed ?? 0;
-        }
-      };
-      this.node.connect(this.ctx.destination);
-      this.status = this.ctx.state;
-    } catch (err) {
-      // reset so the next click retries from scratch instead of reusing
-      // a half-built context; surface the reason in the stats overlay
-      this.status = `FAILED: ${err instanceof Error ? err.message : String(err)}`;
-      this.node = null;
-      void this.ctx?.close();
-      this.ctx = null;
+      return;
     }
+    // ?audio=legacy loads the frozen pre-tile engine for A/B comparison
+    const requested =
+      new URLSearchParams(location.search).get('audio') === 'legacy'
+        ? 'granular-legacy.js'
+        : 'granular-processor.js';
+    try {
+      const ctx = await this.initContext(requested);
+      this.status = ctx.state;
+    } catch (err) {
+      // reset so a retry (below or on the next click) starts from
+      // scratch instead of reusing a half-built context
+      this.reset();
+      // graceful degradation: the tile engine is an ES-module worklet
+      // (it imports './dsp.js'), and AudioWorklet implementations that
+      // can't load module imports reject addModule — non-Chromium
+      // browsers would otherwise fail closed with silence. The legacy
+      // engine is a single self-contained file: retry ONCE with it.
+      if (requested !== 'granular-legacy.js') {
+        try {
+          await this.initContext('granular-legacy.js');
+          this.status = 'running (legacy engine — reduced voices)';
+          return;
+        } catch {
+          this.reset();
+        }
+      }
+      // surface the original failure in the stats overlay
+      this.status = `FAILED: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  /** Build the AudioContext + worklet node for one engine file. Throws on
+   *  failure with `this.ctx`/`this.node` possibly half-built — callers
+   *  must reset() before retrying. */
+  private async initContext(engineFile: string): Promise<AudioContext> {
+    const ctx = new AudioContext({ latencyHint: 'interactive' });
+    this.ctx = ctx;
+    await ctx.audioWorklet.addModule(
+      `${import.meta.env.BASE_URL}${engineFile}`,
+    );
+    this.node = new AudioWorkletNode(ctx, 'ocean-granular', {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+    });
+    this.node.port.onmessage = (e) => {
+      if (e.data.type === 'stats') {
+        this.voiceCount = e.data.grains;
+        this.bedCount = e.data.bed ?? 0;
+      }
+    };
+    this.node.connect(ctx.destination);
+    return ctx;
+  }
+
+  private reset(): void {
+    this.node = null;
+    void this.ctx?.close();
+    this.ctx = null;
   }
 
   /**
