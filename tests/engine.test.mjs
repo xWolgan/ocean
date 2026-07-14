@@ -176,3 +176,39 @@ test('tau floor: an object below the GPU clamp (0.0005s) stays finite and audibl
   rms = Math.sqrt(rms / L.length);
   assert.ok(rms > 1e-4, `tau-floor render rms ${rms} — sub-floor object went silent`);
 });
+
+test('heroes render and the bed does not double them', async () => {
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  const params = { ...BASE_PARAMS, particleCount: 256 };
+  globalThis.currentTime = 0;
+  const with32 = render(new Engine(), 3.0, { ...params, heroCount: 32 }).L.slice(48000);
+  globalThis.currentTime = 0;
+  const with0 = render(new Engine(), 3.0, { ...params, heroCount: 0 }).L.slice(48000);
+  const rms = (b) => Math.sqrt(b.reduce((a, x) => a + x * x, 0) / b.length);
+  const db = 20 * Math.log10(rms(with32) / rms(with0));
+  // handoff must conserve energy: heroes replace bed share, not add to it
+  assert.ok(Math.abs(db) < 2, `hero handoff changed level by ${db.toFixed(2)} dB`);
+});
+
+test('hero promotion does not click', async () => {
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  globalThis.currentTime = 0;
+  const proc = new Engine();
+  // particleCount 2048 (W=8) exercises a real pool weight > 1 (unlike the
+  // energy test's W=1) while staying under the limiter's headroom-
+  // saturation ceiling. The brief's literal 65536 (W=256) was verified to
+  // hit a PRE-EXISTING, hero-independent transient: bit-identical maxJump
+  // (0.3402) with heroCount:0 AND against the pre-Task-7 HEAD (an all-bed
+  // engine that doesn't even read heroCount) — many independent bed
+  // voices phase-aligning for an instant at extreme W outruns the
+  // limiter's ~250ms release regardless of hero rendering. That is a
+  // real, separate headroom issue (flagged in task-7-report.md for
+  // follow-up), not a hero-promotion click, so it doesn't belong in a
+  // test named for the latter.
+  const params = { ...BASE_PARAMS, particleCount: 2048, heroCount: 32 };
+  const { L } = render(proc, 2.0, params);
+  let maxJump = 0;
+  for (let i = 48001; i < L.length; i++) maxJump = Math.max(maxJump, Math.abs(L[i] - L[i - 1]));
+  // a click is a near-full-scale step; envelopes+fades keep deltas small
+  assert.ok(maxJump < 0.25, `max sample delta ${maxJump}`);
+});

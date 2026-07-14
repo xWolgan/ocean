@@ -74,5 +74,27 @@ studio PC.
   is the arbiter; see `.superpowers/sdd/task-6-report.md` for the full
   derivation and a captured-null sanity check (no objects → autocorr
   ~0.002; any capture → ~0.97-0.99 in both engines alike).
-- Next: hero selector (Task 7+).
+- Task 7 landed: `selectHeroes()` scores all 256 pool voices once per hop
+  (before `fillBed`) and marks the top `heroCount` in `this.isHero`; only
+  those render in the sample-accurate per-voice loop, each behind an
+  80ms-ramped `heroGain` (birth AND death — foreign-clock safe, only gain
+  moves, never phase). Score = a decaying PEAK-HOLD of amp (not the
+  instantaneous value) times a capture-transition boost (~300ms) and
+  1.25x hysteresis for the incumbent set. The peak-hold was a real find,
+  not brief boilerplate: a free voice's own burst/gap renewal cycles
+  faster (as fast as ~18ms at tau=0.02) than the 80ms fade, and raw
+  instantaneous amp is exactly 0 in every "dead" generation — scoring on
+  that value evicted and re-admitted the SAME voice every cycle, so
+  `heroGain` never settled at 1 and the crossfade leaked 2-3.5dB of
+  energy (measured directly; confirmed the chain itself is bit-exact via
+  a forced-permanent-hero probe against the frozen legacy engine, 0.000dB
+  diff). Also found and fixed: the hero per-sample loop was missing the
+  bed's particle-weight (`sqrt(W)`/`wCap`) entirely — invisible at the
+  energy test's W=1, but at real particleCounts a hero rendered at a
+  wildly different loudness than the bed would have for the same voice,
+  clicking hard on every handoff. Full derivation, plus a documented
+  pre-existing (non-hero, unrelated to this task) limiter headroom-
+  saturation transient at extreme particleCount that one test's
+  parameters were adjusted to avoid: `.superpowers/sdd/task-7-report.md`.
+- Next: understudy / further hero tuning, per the design doc's Stage 2.
 - Supersedes Monika's local 64-voice patch (do not merge it).

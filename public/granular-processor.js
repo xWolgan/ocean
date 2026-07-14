@@ -255,12 +255,24 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.ringWrite = 0;
     this.bedTime = null; // app-clock time of the next hop's first sample
     this.testTone = null; // harness hook: {freq, amp} until Task 5 replaces it
-    // hero mask: zero until Task 7's selector fills it. From THIS task on,
-    // the per-sample voice loop renders ONLY hero-masked voices — the
-    // sample-accurate rendering of all 256 pool voices ends here (the bed
-    // takes over as the mass in Tasks 5-6; without this gate the null
-    // tests would hear everything twice).
+    // hero mask: which of the 256 pool voices are promoted to sample-
+    // accurate rendering this hop. Filled every hop by selectHeroes()
+    // (Task 7) from a per-voice salience score; everything else stays in
+    // the spectral bed (Tasks 5-6). Without this gate the null tests
+    // would hear everything twice.
     this.isHero = new Uint8Array(POOL);
+    this.heroScore = new Float32Array(POOL); // this hop's salience score
+    this.heroGain = new Float32Array(POOL); // per-voice fade gain, ramped
+    // ~80ms toward heroTarget — the ONLY thing that lets a voice enter/
+    // leave the sample-accurate loop without a click (foreign-clock rule:
+    // never touch phase, only gain)
+    this.heroTarget = new Float32Array(POOL); // 1 = selected hero this hop
+    this.lastCap = new Int8Array(POOL); // previous hop's v.capOn, to detect
+    // capture/release transitions (individually audible — see selectHeroes)
+    this.transition = new Float32Array(POOL); // decaying transition-salience
+    this.ampHold = new Float32Array(POOL); // decaying peak-hold of scoring amp
+    this.poolSounding = 0; // non-hero pool voices that splatted this hop
+    // (fillBed writes it; process() reads it for the bed stats field)
     this.bedSpat = [0, 0]; // scratch for fillBed's spatialize calls — no per-hop alloc
 
     this.port.onmessage = (e) => {
@@ -287,9 +299,71 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     };
   }
 
+  /** Score every pool voice's salience and mark the top heroCount in
+   *  this.isHero, once per hop, before fillBed. Reads v.capOn/v.capAmp/
+   *  v.amp as last updated by the PREVIOUS hop's fillBed (one-hop-stale
+   *  scoring, by design — fillBed for THIS hop hasn't run yet). A state
+   *  flip (capture gained/lost) is boosted for ~300ms: individually
+   *  audible arrivals/departures deserve a real voice, which is also the
+   *  designed mitigation for fillBed's documented ≤1-block capture-loss
+   *  gap (task-6-report.md) — the freshly-released voice gets promoted
+   *  right at the transition instant. Hysteresis (1.25x for the
+   *  currently-selected set) keeps the hero set from chattering.
+   *
+   *  Scoring rides a decaying PEAK-HOLD of amp, not the instantaneous
+   *  value: a free voice's own burst/gap renewal cycles as fast as
+   *  ~1.8·tau (18ms at the BASE_PARAMS tau=0.02, faster than the 80ms
+   *  fade), and v.amp is EXACTLY 0 for the whole gap of every generation
+   *  (including "dead" ones that lose the density lottery). Scoring on
+   *  that raw value would evict and re-admit the same voice every single
+   *  cycle — heroGain never settles at 1 and the crossfade leaks energy
+   *  out of the mix (measured 2-3.5dB low with the raw signal). Holding
+   *  the peak with the same ~300ms decay as `transition` lets a voice's
+   *  salience survive its own natural silences, so a voice that is
+   *  genuinely active stays selected continuously (gain climbs once and
+   *  stays there) instead of re-fading every burst. */
+  selectHeroes() {
+    const p = this.p;
+    const K = Math.min(POOL, p.heroCount | 0);
+    for (let k = 0; k < POOL; k++) {
+      const v = this.voices[k];
+      const capNow = v.capOn ? 1 : 0;
+      // a state flip is salient for ~300ms — single arrivals/departures
+      // are individually audible and deserve a real voice
+      if (capNow !== this.lastCap[k]) this.transition[k] = 1;
+      this.lastCap[k] = capNow;
+      this.transition[k] *= 0.965; // ~300ms at 94 hops/s
+      const amp = v.capOn ? v.capAmp * p.objectGain : v.amp * p.fieldGain;
+      this.ampHold[k] = Math.max(amp, this.ampHold[k] * 0.965);
+      let s = this.ampHold[k] * (1 + 2 * this.transition[k]);
+      if (v.capOn) s *= 1.5; // playing an instrument leans on heroes
+      // hysteresis: current heroes keep a 1.25x advantage
+      if (this.heroTarget[k] > 0) s *= 1.25;
+      this.heroScore[k] = s;
+    }
+    // top-K by score (POOL=256: simple selection is fine at 94Hz)
+    for (let k = 0; k < POOL; k++) this.heroTarget[k] = 0;
+    for (let pick = 0; pick < K; pick++) {
+      let best = -1;
+      let bestS = 0.0002;
+      for (let k = 0; k < POOL; k++) {
+        if (this.heroTarget[k] === 0 && this.heroScore[k] > bestS) {
+          best = k;
+          bestS = this.heroScore[k];
+        }
+      }
+      if (best < 0) break;
+      this.heroTarget[best] = 1;
+    }
+    for (let k = 0; k < POOL; k++) {
+      this.isHero[k] = this.heroTarget[k] > 0 || this.heroGain[k] > 0.001 ? 1 : 0;
+    }
+  }
+
   /** Bed content for the hop starting at app-time tHop. Tasks 5-6 fill
    *  this with the pool; Task 4 ships a single test blob. */
   fillBed(tHop) {
+    this.poolSounding = 0;
     if (this.testTone) {
       const f = this.testTone.freq;
       const bin = (f * BLOCK) / sampleRate;
@@ -308,6 +382,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     for (let k = 0; k < POOL; k++) {
       if (this.isHero[k]) continue;
       const v = this.voices[k];
+      let sounding = false; // did this voice splat anything this hop?
 
       // captured branch: a captured voice sings on its OBJECT's clock
       // instead of free bursts, mirroring the hero path's captured ? : free
@@ -412,6 +487,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             }
           }
           if (amp <= 0.0002) continue;
+          sounding = true;
           const bin = (v.capFreq * BLOCK) / sampleRate;
           // REAL phase on the OBJECT timeline — the legacy captured
           // oscillator's exact closed form. v.capPhase resets to 0 at each
@@ -452,6 +528,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             }
           }
         }
+        if (sounding) this.poolSounding++;
         continue; // captured: skip the free-burst section
       }
 
@@ -536,6 +613,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           }
         }
         if (amp <= 0.0002) continue;
+        sounding = true;
         const bin = (v.freeFreq * BLOCK) / sampleRate;
         // SLOT-ANCHORED phase, the legacy oscillator's closed form: the
         // per-sample engine resets v.phase = 0 at each generation's first
@@ -592,10 +670,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           }
         }
       }
+      if (sounding) this.poolSounding++;
     }
   }
 
   synthesizeHop() {
+    this.selectHeroes(); // coherent hero mask for the whole hop, before fillBed
     this.bedReL.fill(0); this.bedImL.fill(0);
     this.bedReR.fill(0); this.bedImR.fill(0);
     this.fillBed(this.bedTime);
@@ -983,7 +1063,17 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const objEnvLUT = this.objEnvLUT;
     const spat = [0, 0];
     const sine = this.sine;
-    let active = 0;
+    let activeHeroes = 0;
+    // a hero voice stands in for the SAME particle weight a bed voice
+    // would carry — without this the hero and bed renderings of the same
+    // voice differ by up to sqrt(W)..W (huge at high particleCount),
+    // clicking hard on every hero/bed handoff. Mirrors fillBed's wFree/
+    // wCap exactly (energy-correct at sync=0, amplitude-correct at
+    // sync=1); sqrtW alone is the free-path weight and also the safe
+    // (minimum) floor for the captured one.
+    const W = Math.max(1, p.particleCount / POOL);
+    const sqrtW = Math.sqrt(W);
+    const wFreeHero = sqrtW * p.fieldGain;
 
     const anyObjects = p.objects.some((o) => o && o.level > 0.001);
     for (let k = 0; k < POOL; k++) {
@@ -999,11 +1089,22 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // absorption: which object (if any) claims this voice right now
       if (anyObjects) this.evaluateCapture(v, t, spat);
       else v.capOn = 0;
-      if ((v.capOn ? v.capAmp : v.amp) > 0.0002) active++;
+      if ((v.capOn ? v.capAmp : v.amp) > 0.0002) activeHeroes++;
+
+      const gStep = 1 / (0.08 * sampleRate); // 80ms linear ramp
+      const gTarget = this.heroTarget[k];
 
       // fast path: a silent voice with no generation boundary inside this
-      // block contributes nothing — skip its sample loop entirely
-      if (v.amp * p.fieldGain <= 0.0002 && (!anyObjects || v.capAmp * p.objectGain <= 0.0002)) {
+      // block contributes nothing — skip its sample loop entirely. A
+      // mid-fade voice (gain not yet settled at its target) may NOT use
+      // this skip: its gain must keep ramping every sample even through
+      // silence, or the fade stalls and the hero/bed handoff clicks.
+      // conservative bound: the real captured weight is at most W·objectGain
+      // (sync=1); using that upper bound here (rather than the exact
+      // per-object wCap) means this pre-check can only under-skip, never
+      // wrongly skip an audible voice.
+      if (v.amp * wFreeHero <= 0.0002 && (!anyObjects || v.capAmp * p.objectGain * W <= 0.0002)
+        && this.heroGain[k] <= 0.001 && this.heroTarget[k] === 0) {
         const tEnd = t0 + n * dt;
         const nextF = (v.gen + 1 - v.phi) / invLFree;
         const nextO = v.capOn ? (v.asgGen + 1 - v.asgPhi) / v.asgInvTau : Infinity;
@@ -1036,8 +1137,18 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           }
         }
 
-        // environment and instruments have separate faders
-        const amp = captured ? v.capAmp * p.objectGain : v.amp * p.fieldGain;
+        // environment and instruments have separate faders; captured/free
+        // each carry the SAME particle-weight the bed would give them
+        // (wCap/wFree, mirroring fillBed exactly) so a voice sounds the
+        // same whether it's rendered here or in the spectral tile
+        let amp;
+        if (captured) {
+          const o = p.objects[v.asg];
+          const wCap = (sqrtW + (W - sqrtW) * o.sync) * p.objectGain;
+          amp = v.capAmp * wCap;
+        } else {
+          amp = v.amp * wFreeHero;
+        }
         if (amp > 0.0002) {
           // captured: duty-gapped pulse on the object's clock (order);
           // free: jittered burst inside its slot (renewal — no clock)
@@ -1058,8 +1169,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
               const rich = tA[idx] * (1 - tf) + tB[idx] * tf;
               const osc = pure * (1 - sat) + rich * sat;
               const smp = osc * env * amp;
-              outL[s] += smp * (captured ? v.capPanL : v.panL);
-              outR[s] += smp * (captured ? v.capPanR : v.panR);
+              const hg = this.heroGain[k];
+              outL[s] += smp * hg * (captured ? v.capPanL : v.panL);
+              outR[s] += smp * hg * (captured ? v.capPanR : v.panR);
             }
           }
           // each timeline owns its oscillator phase — the free clock must
@@ -1070,6 +1182,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             v.phase = (v.phase + (v.freeFreq / sampleRate) * TABLE_SIZE) % TABLE_SIZE;
           }
         }
+        // fade progresses every sample regardless of amp/env gating —
+        // a fade-out must reach zero even through an envelope's silence,
+        // or a dying hero could freeze mid-gain and pop when re-triggered
+        const hg0 = this.heroGain[k];
+        this.heroGain[k] = hg0 < gTarget
+          ? Math.min(gTarget, hg0 + gStep)
+          : Math.max(gTarget, hg0 - gStep);
         t += dt;
       }
     }
@@ -1102,7 +1221,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
 
     if (++this.blockCounter >= REPORT_INTERVAL_BLOCKS) {
       this.blockCounter = 0;
-      this.port.postMessage({ type: 'stats', grains: active });
+      this.port.postMessage({
+        type: 'stats',
+        grains: activeHeroes,
+        bed: Math.round(this.poolSounding * Math.max(1, this.p.particleCount / POOL)),
+      });
     }
     return true;
   }
