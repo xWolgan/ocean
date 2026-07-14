@@ -101,7 +101,7 @@ git commit -m "Freeze the legacy voice engine behind ?audio=legacy for A/B null 
   - `BLOCK = 1024`, `HOP = 512`, `KERNEL_HW = 4`, `KERNEL_STEPS = 16`.
   - `makeFFT(n) -> { fft(re, im), ifft(re, im) }` — in-place, allocation-free after construction.
   - `hannWindow(n) -> Float32Array`.
-  - `makeKernel(win) -> { re: Float32Array, im: Float32Array }` — complex spectrum of the window at fractional bin offsets, numerically computed (no closed-form algebra to get wrong). Unnormalized: `kernel(0) ≈ Σwin`.
+  - `makeKernel(win) -> { re: Float32Array }` — REAL spectrum of the circularly-centered window at fractional bin offsets, numerically computed. Unnormalized: `kernel(0) ≈ Σwin`. The uncentered window's linear phase is restored analytically inside `splatBlob`.
   - `splatBlob(specRe, specIm, n, bin, amp, phase, ker)` — adds one grain-tone blob (+ Hermitian mirror). Convention: reconstructing via `ifft` and overlap-adding with the SAME window as analysis yields `amp·cos(2π·f·t + phase)` where `phase` is the tone's phase at the block's first sample and `bin = f·n/sampleRate`.
 
 - [ ] **Step 1: Write `public/dsp.js`**
@@ -190,48 +190,50 @@ export function hannWindow(n) {
 }
 
 /**
- * Complex spectral kernel of `win` sampled at 1/KERNEL_STEPS-bin offsets
- * over ±KERNEL_HW bins: KER[x] = Σ_j win[j]·e^{-i·2π·x·j/n}. Computed by
- * direct DFT once at init (~130k ops) — numerically, so the window's
- * position phase is captured exactly.
+ * Real spectral kernel of the CENTERED window, sampled at 1/KERNEL_STEPS
+ * bin offsets over ±KERNEL_HW bins. Centering (circular shift by n/2)
+ * makes the kernel real and slowly varying, so a LUT can sample it; the
+ * fast-rotating linear phase of the uncentered window is restored
+ * analytically in splatBlob (ψ = phase + π·bin, times (-1)^k per tap).
+ * (An uncentered kernel LUT rotates ~π of phase per bin — 1/16-bin
+ * quantization of that costs ~2% systematic error; caught by the
+ * reconstruction test in the first execution of this plan.)
  */
 export function makeKernel(win) {
   const n = win.length;
   const taps = 2 * KERNEL_HW * KERNEL_STEPS + 1;
   const re = new Float32Array(taps);
-  const im = new Float32Array(taps);
   for (let t = 0; t < taps; t++) {
     const x = (t - KERNEL_HW * KERNEL_STEPS) / KERNEL_STEPS;
     let sr = 0;
-    let si = 0;
     for (let j = 0; j < n; j++) {
-      const a = (-2 * Math.PI * x * j) / n;
-      sr += win[j] * Math.cos(a);
-      si += win[j] * Math.sin(a);
+      const wc = win[(j + n / 2) % n]; // centered window (even → real DFT)
+      sr += wc * Math.cos((-2 * Math.PI * x * j) / n);
     }
     re[t] = sr;
-    im[t] = si;
   }
-  return { re, im };
+  return { re };
 }
 
 /**
  * Add one windowed-tone blob to a complex spectrum (plus its Hermitian
  * mirror, so the IFFT is real). `phase` = tone phase at the block's
  * first sample; `bin` may be fractional. Skips DC and Nyquist.
+ * Exact identity: Y[k] = (-1)^k·(A/2)·e^{i(phase+π·bin)}·Ŵc(k−bin) + mirror.
  */
 export function splatBlob(specRe, specIm, n, bin, amp, phase, ker) {
-  const cs = 0.5 * amp * Math.cos(phase);
-  const sn = 0.5 * amp * Math.sin(phase);
+  const psi = phase + Math.PI * bin;
+  const cs = 0.5 * amp * Math.cos(psi);
+  const sn = 0.5 * amp * Math.sin(psi);
   const k0 = Math.max(1, Math.ceil(bin - KERNEL_HW));
   const k1 = Math.min((n >> 1) - 1, Math.floor(bin + KERNEL_HW));
   const center = KERNEL_HW * KERNEL_STEPS;
   for (let k = k0; k <= k1; k++) {
     const t = Math.round((k - bin) * KERNEL_STEPS) + center;
     const kr = ker.re[t];
-    const ki = ker.im[t];
-    const br = cs * kr - sn * ki;
-    const bi = sn * kr + cs * ki;
+    const s = k & 1 ? -kr : kr;
+    const br = cs * s;
+    const bi = sn * s;
     specRe[k] += br;
     specIm[k] += bi;
     specRe[n - k] += br;
