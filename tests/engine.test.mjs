@@ -261,3 +261,16 @@ test('bed/hero crossfade is complementary: no energy dug out at moderate weight'
   const db = 20 * Math.log10(rms(with32) / rms(with0));
   assert.ok(Math.abs(db) < 0.4, `crossfade leaked ${db.toFixed(3)} dB at W=16`);
 });
+
+test('throughput: worklet renders faster than 4x realtime under load', async () => {
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  globalThis.currentTime = 0;
+  const proc = new Engine();
+  const params = { ...BASE_PARAMS, particleCount: 524288, heroCount: 48, tau: 0.004 };
+  render(proc, 0.5, params); // warmup
+  const t0 = process.hrtime.bigint();
+  render(proc, 4.0, params);
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  console.log(`  throughput: ${(4000 / ms).toFixed(1)}x realtime`);
+  assert.ok(ms < 1000, `4s of audio took ${ms.toFixed(0)}ms`);
+});

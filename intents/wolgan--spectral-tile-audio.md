@@ -129,5 +129,25 @@ studio PC.
   OLA/test-tone plumbing, not particle-count loudness, so it's now pinned
   to `particleCount: 256` (W=1) like its neighboring tests. Full detail in
   `.superpowers/sdd/task-8-report.md`.
+- Task 9 landed: end-to-end proof that Stage 1 actually sings in a real
+  browser, plus an offline throughput number. `probes/audio_stage1.py`
+  drives the live app (vite on :5199, Playwright/Chromium with
+  `--enable-gpu --use-angle=d3d11 --autoplay-policy=no-user-gesture-
+  required`, foreground, always-closed, dev server killed via
+  `taskkill /T /F` in `finally` since `npx`'s cmd wrapper on Windows can
+  otherwise leave the real node.exe behind): clicks to start audio,
+  reads `__ocean.audio.status === 'running'`, checks `bedCount > 1000`
+  at the app's real particle count, and taps the private `ctx`/`node`
+  fields directly (`AudioEngine`'s TS `private` is compile-time only —
+  in dev-mode esbuild output they're plain enumerable properties, no
+  `tap()` accessor needed) to run a live AnalyserNode: audible energy
+  above -80dB in the 55-4000Hz band, and that band beats sub-20Hz rumble
+  by >20dB. Result: `PROBE PASS {"voices": 27, "bed": 44032}
+  {"inBand": -54.9, "sub": -80.25}` — genuinely in-band, no rumble.
+  Also added `tests/engine.test.mjs`'s throughput test (524288 particles,
+  48 heroes, tau 0.004, 4s rendered offline) and recorded the result in
+  the new `PERF.md`: 9.3x realtime on Wolgan's desktop (Ryzen AI 9 HX
+  370). Full run: 15/15 in `node --test "tests/*.test.mjs"`. Details in
+  `.superpowers/sdd/task-9-report.md`.
 - Next: understudy / further hero tuning, per the design doc's Stage 2.
 - Supersedes Monika's local 64-voice patch (do not merge it).
