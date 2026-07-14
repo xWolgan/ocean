@@ -104,5 +104,30 @@ studio PC.
   Before this, promotion dropped the bed share instantly while the hero
   was still ramping — measured -0.815dB of energy dug out of the mix at
   W=16, conserved (+0.06dB) after; guarded by a new ±0.4dB test at W=16.
+- Task 8 landed: the main-thread bridge (`AudioEngine.update`) now learns
+  the field's real particle count and posts it every ~60Hz (`particleCount:
+  count, heroCount: 32`) instead of the worklet quietly defaulting to
+  POOL·512 — `field.count` is threaded through as `update`'s new trailing
+  param from `main.ts`'s call site. `AudioEngine.bedCount` (from the
+  worklet's `{grains, bed}` stats message, already wired in Task 7) now
+  reaches the overlay: `voices    N heroes + ~M bed`. Also landed the
+  loudness fix Task 7's report flagged: the bed's `sqrt(W)` weighting means
+  total output scales with `sqrt(particleCount)`, so at the app's real
+  131k-particle default (W=512) the mix ran far hotter than the legacy
+  calibration and rode the limiter constantly. `this.masterNorm = 1 /
+  sqrt(max(1, particleCount/POOL))` is now computed at params-ingestion
+  time (recomputed every message alongside the existing tau-floor loop,
+  and once at construction from the defaults) and multiplied into the
+  single output-stage `gain` alongside the existing `p.gain * 2.4` —
+  the particle-count dial is a performance dial, not a crescendo; every
+  internal ratio (density, layers, objects) is untouched, only the
+  absolute level is pinned. New test: 3s renders at particleCount 256 vs
+  131072 land within ±3dB of each other. One pre-existing test broke and
+  was fixed, not the masterNorm math: "OLA bed reproduces a fed test tone"
+  never set `particleCount`, so it had been silently running at the
+  W=512 default; its calibrated RMS window predates masterNorm and tests
+  OLA/test-tone plumbing, not particle-count loudness, so it's now pinned
+  to `particleCount: 256` (W=1) like its neighboring tests. Full detail in
+  `.superpowers/sdd/task-8-report.md`.
 - Next: understudy / further hero tuning, per the design doc's Stage 2.
 - Supersedes Monika's local 64-voice patch (do not merge it).

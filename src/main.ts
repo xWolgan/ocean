@@ -140,7 +140,7 @@ renderer.setAnimationLoop((now: number) => {
     statsEl.textContent =
       `fps       ${fpsEma.toFixed(0)}\n` +
       `particles ${Math.round(field.count * bus.out.density).toLocaleString()}\n` +
-      `voices    ${audio.voiceCount}\n` +
+      `voices    ${audio.voiceCount} heroes + ~${audio.bedCount.toLocaleString()} bed\n` +
       `audio     ${audio.status}\n` +
       `backend   ${(renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2'}`;
   }
@@ -154,7 +154,7 @@ renderer.setAnimationLoop((now: number) => {
   field.update(bus.out, tSec, dt);
   field.updateObjects(objects, bus.out.scale);
   aids.update(interaction, objects, tSec);
-  audio.update(bus.out, camera, tSec, field.sonicStride, objects);
+  audio.update(bus.out, camera, tSec, field.sonicStride, objects, field.count);
   controls.update();
 
   renderer.render(scene, camera);

@@ -197,6 +197,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // centerX, centerY, centerZ, reach}
       objects: [],
     };
+    // the particle-count dial is a performance dial, not a crescendo: pin
+    // perceived loudness to the legacy calibration at any count, keep all
+    // internal ratios (density, layers, objects) honest. Computed here from
+    // the just-assigned defaults (not a `1/Math.sqrt(512)` literal, which
+    // would silently drift if POOL or the default particleCount ever change)
+    // and recomputed on every params message.
+    this.masterNorm = 1 / Math.sqrt(Math.max(1, this.p.particleCount / POOL));
     this.clouds = []; // per-slot Float32Array [TARGETS × (x,y,z,r,g,b)]
     this.audioImages = []; // per-slot {size, data(RGBA8)} for image fields
     this.sine = buildTable([[1, 1]]);
@@ -286,6 +293,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         for (const o of this.p.objects) {
           if (o) o.tau = Math.max(o.tau, 0.0005);
         }
+        // the particle-count dial is a performance dial, not a crescendo: pin
+        // perceived loudness to the legacy calibration at any count, keep all
+        // internal ratios (density, layers, objects) honest
+        this.masterNorm = 1 / Math.sqrt(Math.max(1, this.p.particleCount / POOL));
         this.paramsDirty = true;
       } else if (e.data.type === 'audioImages') {
         this.audioImages = e.data.data;
@@ -1211,7 +1222,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // rumble blocker (~35 Hz one-pole high-pass): burst envelopes shed
     // infrasonic energy that has no business in the mix
     const R = this.hpR;
-    const gain = p.gain * 2.4;
+    const gain = p.gain * 2.4 * this.masterNorm;
     // limiter: ride the gain down instead of saturating — many loud
     // voices should get quieter together, not dirtier
     const LIM_THRESH = 0.8;

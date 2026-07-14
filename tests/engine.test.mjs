@@ -21,7 +21,10 @@ test('OLA bed reproduces a fed test tone at the right frequency and level', asyn
   globalThis.currentTime = 0;
   const proc = new Engine();
   send(proc, 'testTone', { freq: 440, amp: 0.2 });
-  const params = { ...BASE_PARAMS, density: 0, gain: 0.5 }; // no voices, bed only
+  // particleCount pinned to POOL (W=1, masterNorm=1): this test calibrates
+  // the OLA/test-tone plumbing itself, not the particle-count loudness
+  // normalization (covered separately by the masterNorm test below)
+  const params = { ...BASE_PARAMS, density: 0, gain: 0.5, particleCount: 256 }; // no voices, bed only
   const { L } = render(proc, 1.0, params);
   const tail = L.slice(24000); // skip ring/OLA warmup
   // goertzel at 440 vs 620 Hz
@@ -211,6 +214,27 @@ test('hero promotion does not click', async () => {
   for (let i = 48001; i < L.length; i++) maxJump = Math.max(maxJump, Math.abs(L[i] - L[i - 1]));
   // a click is a near-full-scale step; envelopes+fades keep deltas small
   assert.ok(maxJump < 0.25, `max sample delta ${maxJump}`);
+});
+
+test('master loudness normalization: total RMS is stable across particleCount', async () => {
+  // the particle-count dial is a performance dial, not a crescendo: the
+  // bed's sqrt(W) weighting makes total output scale with sqrt(particleCount)
+  // unless masterNorm pins it back to the legacy calibration. Compare a
+  // small pool (W=1, masterNorm=1) against the app default (W=512,
+  // masterNorm=1/sqrt(512)) — different random ensembles, so only the
+  // overall level (not sample-exact match) is asserted.
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  globalThis.currentTime = 0;
+  const small = render(new Engine(), 3.0, {
+    ...BASE_PARAMS, particleCount: 256, heroCount: 32,
+  }).L.slice(48000);
+  globalThis.currentTime = 0;
+  const big = render(new Engine(), 3.0, {
+    ...BASE_PARAMS, particleCount: 131072, heroCount: 32,
+  }).L.slice(48000);
+  const rms = (b) => Math.sqrt(b.reduce((a, x) => a + x * x, 0) / b.length);
+  const db = 20 * Math.log10(rms(big) / rms(small));
+  assert.ok(Math.abs(db) < 3, `masterNorm let total level drift by ${db.toFixed(2)} dB`);
 });
 
 test('bed/hero crossfade is complementary: no energy dug out at moderate weight', async () => {

@@ -25,6 +25,8 @@ export class AudioEngine {
 
   /** Latest audible voice count reported by the worklet, for the overlay. */
   voiceCount = 0;
+  /** Latest bed (non-hero) voice count reported by the worklet, for the overlay. */
+  bedCount = 0;
   /** Human-readable engine state for the overlay (remote debugging). */
   status = 'off (click to start)';
 
@@ -54,7 +56,10 @@ export class AudioEngine {
         outputChannelCount: [2],
       });
       this.node.port.onmessage = (e) => {
-        if (e.data.type === 'stats') this.voiceCount = e.data.grains;
+        if (e.data.type === 'stats') {
+          this.voiceCount = e.data.grains;
+          this.bedCount = e.data.bed ?? 0;
+        }
       };
       this.node.connect(this.ctx.destination);
       this.status = this.ctx.state;
@@ -72,6 +77,8 @@ export class AudioEngine {
    * Stream control state; internally throttled to ~60 Hz.
    * @param tSec   the app clock also driving the GPU field
    * @param stride particle index step between sonic samples
+   * @param count  total live particle count (the field's true size, for
+   *               the worklet's bed weighting and loudness normalization)
    */
   update(
     state: FieldState,
@@ -79,6 +86,7 @@ export class AudioEngine {
     tSec: number,
     stride: number,
     objects: ObjectManager,
+    count: number,
   ): void {
     if (!this.node || !this.ctx) return;
     const nowMs = performance.now();
@@ -135,6 +143,8 @@ export class AudioEngine {
           FIELD_HALF_EXTENTS.z * 2,
         ],
         stride,
+        particleCount: count,
+        heroCount: 32,
         objects: objects.audioDescriptors(state.scale),
       },
     });
