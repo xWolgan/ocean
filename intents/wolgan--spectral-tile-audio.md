@@ -49,6 +49,15 @@ studio PC.
 - Implementation plan for Stage 1 + the readback probe:
   `docs/superpowers/plans/2026-07-14-spectral-tile-audio-stage1.md`
   (11 tasks; Stage 2 gets its own plan once the probe numbers exist).
-- Next: execute the plan — Stage 1 (heroes + analytic tile bed), then
-  the Quest readback probe gating Stage 2 (GPU-measured tiles).
+- Task 5 landed: the free field renders as spectral blobs at block rate
+  and NULL-TESTS against the frozen per-sample engine (bands 1–6 within
+  ±3 dB, total within ±1.5 dB). Getting there took three discoveries,
+  all documented in `.superpowers/sdd/task-5-report.md`: bursts need
+  duration-bucketed grain kernels (Gabor), a grain must be splatted at
+  its true position ONCE (not smeared per hop), and — the deep one — the
+  legacy oscillator's per-slot phase reset makes each voice's burst
+  train COHERENT, so the bed now computes that same closed-form
+  slot-anchored phase instead of hash-random phases (salt 1201 retired;
+  see report for the measurement that forced this).
+- Next: Task 6+ (objects into the bed), then hero selector.
 - Supersedes Monika's local 64-voice patch (do not merge it).

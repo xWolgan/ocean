@@ -16,8 +16,14 @@ export function h2(i, g, salt) {
 
 export const BLOCK = 1024;
 export const HOP = 512;
-export const KERNEL_HW = 4; // blob half-width in bins
+export const KERNEL_HW = 4; // base-blob half-width in bins
 export const KERNEL_STEPS = 16; // fractional-bin resolution
+export const GRAIN_HW_MAX = 32; // widest grain-kernel half-width in bins
+// grain-kernel tail cut: smallest hw whose out-tail is below this share
+// of Σ|G|². 1% stopped at the main lobe's edge and amputated every
+// sidelobe — and a burst's sidelobes are real, audible signal (the null
+// test's high bands sample them between partial comb lines).
+export const GRAIN_TAIL_EPS = 0.0005;
 
 /** In-place iterative radix-2 complex FFT/IFFT with baked tables. */
 export function makeFFT(n) {
@@ -102,30 +108,151 @@ export function makeKernel(win) {
     }
     re[t] = sr;
   }
-  return { re };
+  return { re, hw: KERNEL_HW, steps: KERNEL_STEPS };
+}
+
+/** Σ re² over the kernel's integer-bin offsets — the energy a splat at an
+ *  integer bin deposits per unit amp². The common currency all kernels in
+ *  a family are normalized to. */
+export function kernelIntEnergy(ker) {
+  let e = 0;
+  for (let k = -ker.hw; k <= ker.hw; k++) {
+    const v = ker.re[(ker.hw + k) * ker.steps];
+    e += v * v;
+  }
+  return e;
+}
+
+/**
+ * Bake a duration-bucketed GRAIN kernel into `out` ({re, hw, steps}).
+ * A burst is a grain of its OWN duration, so its true spectral width is
+ * set by its own envelope's Fourier transform (Gabor), not by the fixed
+ * analysis window. `env` (length d ≤ n samples) is the grain's amplitude
+ * envelope; it is placed centered under the analysis window `win`
+ * (length n), FFT'd, and its MAGNITUDE spectrum is sampled on the
+ * fractional-bin grid out to the half-width `hw` past which the spectral
+ * tail holds <1% of Σ|G|² (capped at GRAIN_HW_MAX).
+ *
+ * The kernel keeps the SIGNED real spectrum of the CENTERED grain (same
+ * convention as makeKernel): for a symmetric envelope this is exact, and
+ * the sidelobes' sign alternation is what makes a voice's coherent burst
+ * train interfere correctly between its comb lines (an all-positive
+ * magnitude kernel measurably mis-sums there). For an asymmetric
+ * envelope the antisymmetric (imaginary) residual is discarded — the
+ * deliberate approximation: burst-position phase detail beyond this is
+ * statistically honest for the mass, whose fine phases are noise-regime.
+ *
+ * Energy: the kernel is rescaled so its integer-offset Σre² equals
+ * `targetEnergy` (pass the BASE kernel's kernelIntEnergy) — the caller's
+ * amplitude term keeps carrying the energy; the kernel carries only the
+ * shape, so one calibration constant covers every bucket.
+ *
+ * scratchRe/scratchIm are caller-owned Float32Array(n): zero allocation
+ * here, safe to call at control-rate rebakes.
+ */
+export function bakeGrainKernel(out, env, d, win, fftEngine, scratchRe, scratchIm, targetEnergy) {
+  const n = win.length;
+  const steps = out.steps;
+  scratchRe.fill(0);
+  scratchIm.fill(0);
+  const start = (n - d) >> 1;
+  for (let j = 0; j < d; j++) scratchRe[start + j] = env[j] * win[start + j];
+  fftEngine.fft(scratchRe, scratchIm);
+  const half = n >> 1;
+  // signed real spectrum of the grain re-centered to t=0: the grain sits
+  // at n/2, so rotate by (-1)^b (in place; ascending b only reads
+  // re[b] before overwriting it)
+  let total = 0;
+  for (let b = 0; b <= half; b++) {
+    const m = b & 1 ? -scratchRe[b] : scratchRe[b];
+    scratchRe[b] = m;
+    total += m * m;
+  }
+  // half-width: smallest hw whose tail beyond it holds <GRAIN_TAIL_EPS
+  // of Σ|G|²
+  let hw = 0;
+  let head = scratchRe[0] * scratchRe[0];
+  while (hw < GRAIN_HW_MAX && total - head >= GRAIN_TAIL_EPS * total) {
+    hw++;
+    head += scratchRe[hw] * scratchRe[hw];
+  }
+  out.hw = hw;
+  const taps = 2 * hw * steps + 1;
+  for (let t = 0; t < taps; t++) {
+    const x = Math.abs(t - hw * steps) / steps; // |bin offset| — |G| is even
+    const b0 = x | 0;
+    const fr = x - b0;
+    out.re[t] = scratchRe[b0] * (1 - fr) + scratchRe[b0 + 1] * fr;
+  }
+  let e = 0;
+  for (let k = -hw; k <= hw; k++) {
+    const v = out.re[(hw + k) * steps];
+    e += v * v;
+  }
+  const s = Math.sqrt(targetEnergy / e);
+  for (let t = 0; t < taps; t++) out.re[t] *= s;
+  return out;
 }
 
 /**
  * Add one windowed-tone blob to a complex spectrum (plus its Hermitian
  * mirror, so the IFFT is real). `phase` = tone phase at the block's
  * first sample; `bin` may be fractional. Skips DC and Nyquist.
+ *
+ * `shift` (samples, optional) recenters the kernel's time-domain pulse
+ * from the block center (n/2) to n/2+shift via a per-tap linear phase,
+ * while compensating the carrier so `phase` keeps meaning "tone phase at
+ * the block's first sample". This restores a short grain's position
+ * within the block — without it, the hops that share a burst would each
+ * anchor the same pulse at their own origin, and their coherent sum
+ * grows a cos²(π·δ/2) comb across the burst's spectrum (measured: -6dB
+ * notches at odd-bin offsets, +3dB at even). The pulse is circular:
+ * keep |shift| well under n/2 or energy wraps to the block's other end.
  */
-export function splatBlob(specRe, specIm, n, bin, amp, phase, ker) {
+export function splatBlob(specRe, specIm, n, bin, amp, phase, ker, shift = 0) {
   const psi = phase + Math.PI * bin;
   const cs = 0.5 * amp * Math.cos(psi);
   const sn = 0.5 * amp * Math.sin(psi);
-  const k0 = Math.max(1, Math.ceil(bin - KERNEL_HW));
-  const k1 = Math.min((n >> 1) - 1, Math.floor(bin + KERNEL_HW));
-  const center = KERNEL_HW * KERNEL_STEPS;
+  const hw = ker.hw;
+  const steps = ker.steps;
+  const k0 = Math.max(1, Math.ceil(bin - hw));
+  const k1 = Math.min((n >> 1) - 1, Math.floor(bin + hw));
+  const center = hw * steps;
+  if (shift === 0) {
+    for (let k = k0; k <= k1; k++) {
+      const t = Math.round((k - bin) * steps) + center;
+      const kr = ker.re[t];
+      const s = k & 1 ? -kr : kr;
+      const br = cs * s;
+      const bi = sn * s;
+      specRe[k] += br;
+      specIm[k] += bi;
+      specRe[n - k] += br;
+      specIm[n - k] -= bi;
+    }
+    return;
+  }
+  // delay-by-shift rotation e^{-i·2π·(k-bin)·shift/n}, recurrence-stepped
+  // per tap — the pure delay e^{-i·2πk·shift/n} times the carrier
+  // compensation e^{+i·2π·bin·shift/n} in one factor
+  const stepA = (-2 * Math.PI * shift) / n;
+  const rc = Math.cos(stepA);
+  const rs = Math.sin(stepA);
+  const a0 = (k0 - bin) * stepA;
+  let cr = Math.cos(a0);
+  let ci = Math.sin(a0);
   for (let k = k0; k <= k1; k++) {
-    const t = Math.round((k - bin) * KERNEL_STEPS) + center;
+    const t = Math.round((k - bin) * steps) + center;
     const kr = ker.re[t];
     const s = k & 1 ? -kr : kr;
-    const br = cs * s;
-    const bi = sn * s;
+    const br = (cs * cr - sn * ci) * s;
+    const bi = (sn * cr + cs * ci) * s;
     specRe[k] += br;
     specIm[k] += bi;
     specRe[n - k] += br;
     specIm[n - k] -= bi;
+    const nc = cr * rc - ci * rs;
+    ci = cr * rs + ci * rc;
+    cr = nc;
   }
 }

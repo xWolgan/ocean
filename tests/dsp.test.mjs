@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  makeFFT, hannWindow, makeKernel, splatBlob, BLOCK, HOP, pcg,
+  makeFFT, hannWindow, makeKernel, splatBlob, kernelIntEnergy, bakeGrainKernel,
+  BLOCK, HOP, KERNEL_STEPS, GRAIN_HW_MAX, pcg,
 } from '../public/dsp.js';
 
 const FS = 48000;
@@ -55,4 +56,31 @@ test('splatBlob + ifft + OLA reconstructs the exact windowed tone', () => {
   }
   // sidelobe truncation at ±4 bins bounds the error; must be inaudible
   assert.ok(maxErr < amp * 0.02, `max error ${maxErr}`);
+});
+
+test('grain kernel: short duration is broadband, energy matches the base kernel', () => {
+  const fftEngine = makeFFT(BLOCK);
+  const win = hannWindow(BLOCK);
+  const base = makeKernel(win);
+  const baseE = kernelIntEnergy(base);
+  // a short grain: Hann-ish envelope over d=128 samples (~2.7ms at 48k),
+  // built the same way the worklet's bakeGrainFamily does
+  const d = 128;
+  const env = new Float32Array(d);
+  for (let j = 0; j < d; j++) env[j] = 0.5 - 0.5 * Math.cos((2 * Math.PI * j) / d);
+  const out = {
+    re: new Float32Array(2 * GRAIN_HW_MAX * KERNEL_STEPS + 1),
+    hw: 0,
+    steps: KERNEL_STEPS,
+  };
+  bakeGrainKernel(
+    out, env, d, win, fftEngine,
+    new Float32Array(BLOCK), new Float32Array(BLOCK), baseE,
+  );
+  // (a) Gabor: the short grain's kernel must be wider than the base
+  assert.ok(out.hw > base.hw, `grain hw ${out.hw} must exceed base hw ${base.hw}`);
+  assert.ok(out.hw <= GRAIN_HW_MAX, `grain hw ${out.hw} within cap`);
+  // (b) energy-normalized: integer-offset Σre² within 1% of the base's
+  const e = kernelIntEnergy(out);
+  assert.ok(Math.abs(e - baseE) / baseE < 0.01, `Σre² ${e} vs base ${baseE}`);
 });

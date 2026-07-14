@@ -15,7 +15,13 @@ globalThis.registerProcessor = (name, cls) => registered.push(cls);
 
 export async function loadEngine(fileUrl) {
   const before = registered.length;
-  await import(fileUrl);
+  // bust Node's ES-module cache: re-importing the same URL twice (e.g. the
+  // same legacy/engine file loaded by two different tests) would otherwise
+  // resolve to the already-evaluated module and never re-run
+  // registerProcessor, leaving `registered` unchanged.
+  const bustedUrl = new URL(fileUrl);
+  bustedUrl.searchParams.set('t', `${Date.now()}-${Math.random()}`);
+  await import(bustedUrl.href);
   if (registered.length === before) throw new Error(`no processor in ${fileUrl}`);
   return registered[registered.length - 1];
 }

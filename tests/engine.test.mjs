@@ -41,3 +41,43 @@ test('OLA bed reproduces a fed test tone at the right frequency and level', asyn
   // 0.2 amp * gain(0.5)*2.4 = 0.24 expected peak → rms ≈ 0.17, wide tolerance
   assert.ok(rms > 0.08 && rms < 0.35, `rms ${rms}`);
 });
+
+function bandEnergies(buf, bands = 8) {
+  // octave-ish bands from 55 Hz: [55,110), [110,220) ... via goertzel probes
+  const out = [];
+  for (let b = 0; b < bands; b++) {
+    const f0 = 55 * 2 ** b;
+    let e = 0;
+    for (const f of [f0 * 1.15, f0 * 1.4, f0 * 1.7]) {
+      let re = 0, im = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const a = (2 * Math.PI * f * i) / 48000;
+        re += buf[i] * Math.cos(a);
+        im += buf[i] * Math.sin(a);
+      }
+      e += (re * re + im * im) / buf.length;
+    }
+    out.push(e);
+  }
+  return out;
+}
+
+test('null test: free-field bed matches legacy band energies (W=1)', async () => {
+  const Legacy = await loadEngine(new URL('../public/granular-legacy.js', import.meta.url));
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  const params = { ...BASE_PARAMS, particleCount: 256, heroCount: 0 };
+  globalThis.currentTime = 0;
+  const legacy = render(new Legacy(), 4.0, BASE_PARAMS).L.slice(48000);
+  globalThis.currentTime = 0;
+  const mine = render(new Engine(), 4.0, params).L.slice(48000);
+  const eL = bandEnergies(legacy);
+  const eM = bandEnergies(mine);
+  const rms = (b) => Math.sqrt(b.reduce((a, x) => a + x, 0));
+  const totalDb = 20 * Math.log10(rms(eM) / rms(eL));
+  assert.ok(Math.abs(totalDb) < 1.5, `total level off by ${totalDb.toFixed(2)} dB`);
+  for (let b = 1; b < 7; b++) { // ignore extreme bands (HP filter / hueToFreq clamp)
+    if (eL[b] < 1e-9) continue;
+    const db = 10 * Math.log10(eM[b] / eL[b]);
+    assert.ok(Math.abs(db) < 3, `band ${b} off by ${db.toFixed(2)} dB`);
+  }
+});
