@@ -1,10 +1,23 @@
 /**
  * OCEAN twin-scheduler engine — the substance, audible rendering.
  *
+ * Three renderers cover the field:
+ *   - heroes: the ~heroCount most salient voices of a 256-voice hash
+ *     pool, rendered sample-accurately by the per-voice loop below (the
+ *     "instruments"), crossfaded in and out of the bed by heroGain.
+ *   - spectral-tile bed: everyone else — one IFFT/overlap-add hop per
+ *     ear renders the mass as EXACT windowed-tone blob splats: same PCG
+ *     hashes, same closed-form slot/cycle-anchored phases as the
+ *     per-sample path (measured-exact, not a statistical stand-in), each
+ *     pool voice carrying the weight of particleCount/256 real particles.
+ *   - legacy twin: the frozen pre-tile per-sample engine
+ *     (granular-legacy.js, behind ?audio=legacy) for A/B comparison —
+ *     also the fallback when this ES-module worklet cannot load.
+ *
  * The visual field is a stateless stochastic process: particle i in
  * generation g flashes at a hash-derived position for tau*(0.5+hash(i))
  * seconds. This worklet evaluates the SAME function (same PCG hashes,
- * same clock) sample-accurately for a strided sample of 256 particles.
+ * same clock) for a 256-voice pool strided across the particle field.
  *
  * The content of every grain is a PURE SINE — plus secondary tones
  * mapped from the particle's color, dimension by dimension:
@@ -21,22 +34,28 @@
  * cluster (chord of their own sizes) pulsing at the fundamental 1/tau.
  */
 
-const VOICES = 256;
+import {
+  pcg, h2, BLOCK, HOP, KERNEL_HW, KERNEL_STEPS, GRAIN_HW_MAX,
+  makeFFT, hannWindow, makeKernel, splatBlob, kernelIntEnergy, bakeGrainKernel,
+} from './dsp.js';
+
+const POOL = 256;
+// calibrated against legacy engine RMS, Task 5 (measured total-level
+// offset with the grain-kernel family, slot-anchored phases and true
+// wavetable blend in place; see task-5-report.md, fix round 2)
+const BED_CAL = 0.6455;
+// grain-kernel duration buckets (samples): a burst's in-block overlap is
+// rounded to the nearest bucket in log2. GRAIN_BUCKETS[i] = 64 << i.
+const GRAIN_BUCKETS = [64, 128, 256, 512, 1024];
+const GRAIN_LOG2_MIN = 6; // log2(GRAIN_BUCKETS[0])
+// sqrt(BLOCK / Σ hann²) = sqrt(8/3): rescales a grain splat from the base
+// kernel's energy convention (spread over the whole windowed block) to a
+// pulse of the slice's own duration (see fillBed)
+const GRAIN_COLA = Math.sqrt(8 / 3);
 const REPORT_INTERVAL_BLOCKS = 40;
 const TABLE_SIZE = 2048;
 const TABLE_MASK = TABLE_SIZE - 1;
 const ENV_LUT_SIZE = 512;
-
-function pcg(n) {
-  const state = (Math.imul(n, 747796405) + 2891336453) >>> 0;
-  const word = Math.imul((state >>> ((state >>> 28) + 4)) ^ state, 277803737) >>> 0;
-  return (((word >>> 22) ^ word) >>> 0) / 4294967296;
-}
-
-// 2D hash over (particle, generation, salt) — must match the GPU shader
-function h2(i, g, salt) {
-  return pcg((Math.imul(i, 1009) + Math.imul(g, 9176) + salt) >>> 0);
-}
 
 /** The timbre wheel: harmonic recipes around the hue circle. */
 const RECIPES = [
@@ -58,6 +77,9 @@ function buildTable(recipe) {
   let peak = 0;
   for (let j = 0; j < TABLE_SIZE; j++) peak = Math.max(peak, Math.abs(t[j]));
   if (peak > 0) for (let j = 0; j < TABLE_SIZE; j++) t[j] /= peak;
+  // the bed needs the normalization the hot loop bakes into the table:
+  // partial h of this table sounds at a·(1/peak), not at its raw a
+  t.peak = peak || 1;
   return t;
 }
 
@@ -149,6 +171,31 @@ class Voice {
     this.phase = 0;
     this.offN = 0; // burst offset within slot (fraction)
     this.durN = 0.5; // burst duration within slot (fraction)
+
+    // BED-SIDE derivation state. fillBed's cursor runs up to ~1536
+    // samples ahead of the hero loop's clock (ring backlog + block
+    // lookahead), so the bed must NEVER derive into the hero-rendered
+    // fields above: during a crossfade both renderers process the same
+    // voice, and a shared cursor would reset the running oscillator
+    // phase and drag generation state back and forth between the two
+    // clocks (foreign-clock violation). Everything the bed derives is
+    // hash-pure per (particle index, generation), so this is just a
+    // preallocated write target with the same field names and initial
+    // values — the derivation helpers take an explicit target (the
+    // Voice itself on the hero path, this struct on the bed path).
+    // phase/capPhase exist only so the shared helpers can write them;
+    // the bed splats closed-form anchored phases and never reads them.
+    this.bed = {
+      gen: -1e18, phase: 0, durN: 0.5, offN: 0,
+      fx: 0, fy: 0, fz: 0,
+      freeTableA: 0, freeTableB: 0, freeTableFrac: 0,
+      freeSat: 0, freeFreq: 440,
+      amp: 0, panL: 0.7, panR: 0.7,
+      asg: -1, asgGen: -1e18, asgInvTau: 1, asgPhi: 0,
+      capPhase: 0, capOn: 0, capFreq: 440, capSat: 0, capBright: 1,
+      capTableA: 0, capTableB: 0, capTableFrac: 0, capAmp: 0,
+      capPanL: 0.7, capPanR: 0.7,
+    };
   }
 }
 
@@ -167,6 +214,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       gain: 0.5,
       fieldGain: 1.0,
       objectGain: 1.0,
+      particleCount: POOL * 512,
+      heroCount: 32,
       timeOffset: 0,
       listener: [0, 1.7, 4.4],
       right: [1, 0, 0],
@@ -177,10 +226,18 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // centerX, centerY, centerZ, reach}
       objects: [],
     };
+    // the particle-count dial is a performance dial, not a crescendo: pin
+    // perceived loudness to the legacy calibration at any count, keep all
+    // internal ratios (density, layers, objects) honest. Computed here from
+    // the just-assigned defaults (not a `1/Math.sqrt(512)` literal, which
+    // would silently drift if POOL or the default particleCount ever change)
+    // and recomputed on every params message.
+    this.masterNorm = 1 / Math.sqrt(Math.max(1, this.p.particleCount / POOL));
     this.clouds = []; // per-slot Float32Array [TARGETS × (x,y,z,r,g,b)]
     this.audioImages = []; // per-slot {size, data(RGBA8)} for image fields
     this.sine = buildTable([[1, 1]]);
     this.wheel = RECIPES.map(buildTable);
+    this.wheelInvPeak = this.wheel.map((t) => 1 / t.peak);
     this.voices = [];
     this.builtStride = -1;
     this.blockCounter = 0;
@@ -199,9 +256,86 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.limEnv = 0;
     this.limRelease = Math.exp(-1 / (0.25 * sampleRate));
 
+    // --- spectral-tile bed (one IFFT per hop per ear renders the mass) ---
+    this.fftEngine = makeFFT(BLOCK);
+    this.win = hannWindow(BLOCK);
+    this.ker = makeKernel(this.win);
+    // grain-kernel family: one duration-bucketed kernel per GRAIN_BUCKETS
+    // entry, baked from the CURRENT envelope shape (bakeGrainFamily). A
+    // short burst is broadband because Gabor says so — the fixed analysis-
+    // window kernel above cannot represent that; these can. Everything is
+    // preallocated here so rebakes allocate nothing.
+    this.kerBaseEnergy = kernelIntEnergy(this.ker);
+    this.grainKers = [];
+    for (let b = 0; b < GRAIN_BUCKETS.length; b++) {
+      this.grainKers.push({
+        re: new Float32Array(2 * GRAIN_HW_MAX * KERNEL_STEPS + 1),
+        hw: KERNEL_HW,
+        steps: KERNEL_STEPS,
+      });
+    }
+    this.grainScratchRe = new Float32Array(BLOCK);
+    this.grainScratchIm = new Float32Array(BLOCK);
+    this.grainEnvScratch = new Float32Array(BLOCK);
+    this.bakedSmear = null; // last-baked envelope shape — rebake the
+    this.bakedAsym = null; // family ONLY when these actually change
+    this.bedReL = new Float32Array(BLOCK);
+    this.bedImL = new Float32Array(BLOCK);
+    this.bedReR = new Float32Array(BLOCK);
+    this.bedImR = new Float32Array(BLOCK);
+    this.olaL = new Float32Array(HOP); // previous block's tail
+    this.olaR = new Float32Array(HOP);
+    this.ringL = new Float32Array(4096);
+    this.ringR = new Float32Array(4096);
+    this.ringRead = 0;
+    this.ringWrite = 0;
+    this.bedTime = null; // app-clock time of the next hop's first sample
+    this.testTone = null; // harness hook: {freq, amp} until Task 5 replaces it
+    // hero mask: which of the 256 pool voices are promoted to sample-
+    // accurate rendering this hop. Filled every hop by selectHeroes()
+    // (Task 7) from a per-voice salience score; everything else stays in
+    // the spectral bed (Tasks 5-6). Without this gate the null tests
+    // would hear everything twice.
+    this.isHero = new Uint8Array(POOL);
+    this.heroScore = new Float32Array(POOL); // this hop's salience score
+    this.heroGain = new Float32Array(POOL); // per-voice fade gain, ramped
+    // ~80ms toward heroTarget — the ONLY thing that lets a voice enter/
+    // leave the sample-accurate loop without a click (foreign-clock rule:
+    // never touch phase, only gain)
+    this.heroTarget = new Float32Array(POOL); // 1 = selected hero this hop
+    this.lastCap = new Int8Array(POOL); // previous hop's v.capOn, to detect
+    // capture/release transitions (individually audible — see selectHeroes)
+    this.transition = new Float32Array(POOL); // decaying transition-salience
+    this.ampHold = new Float32Array(POOL); // decaying peak-hold of scoring amp
+    this.heroActive = new Uint8Array(POOL); // 1 while a voice's hero-side
+    // generation/phase state is live (set at promotion, cleared when the
+    // voice fully leaves the hero set) — the next promotion re-anchors
+    // its oscillator phases in closed form so it rises under the bed
+    // phase-continuously instead of restarting mid-generation at 0
+    this.scoreAmp = new Float32Array(POOL); // selectHeroes' scoring inputs,
+    this.scoreCapOn = new Uint8Array(POOL); // recorded by whichever renderer
+    // owns the voice (fillBed for bed voices, the hero loop for promoted
+    // ones): selectHeroes must never read hero-owned Voice state for a
+    // voice the bed is deriving into its own struct
+    this.poolSounding = 0; // non-hero pool voices that splatted this hop
+    // (fillBed writes it; process() reads it for the bed stats field)
+    this.bedSpat = [0, 0]; // scratch for fillBed's spatialize calls — no per-hop alloc
+
     this.port.onmessage = (e) => {
       if (e.data.type === 'params') {
         Object.assign(this.p, e.data.data);
+        // floor object tau at ingestion, mirroring the GPU's clamp in
+        // ParticleField.ts (`C.x.max(0.0005)`) — the deterministic-twins
+        // invariant: the audio side was missing the floor. (The frozen
+        // legacy engine still lacks it, which only matters at settings
+        // where legacy already diverged from the GPU.)
+        for (const o of this.p.objects) {
+          if (o) o.tau = Math.max(o.tau, 0.0005);
+        }
+        // the particle-count dial is a performance dial, not a crescendo: pin
+        // perceived loudness to the legacy calibration at any count, keep all
+        // internal ratios (density, layers, objects) honest
+        this.masterNorm = 1 / Math.sqrt(Math.max(1, this.p.particleCount / POOL));
         this.paramsDirty = true;
       } else if (e.data.type === 'audioImages') {
         this.audioImages = e.data.data;
@@ -209,15 +343,440 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         // full constellations: the worklet samples per-generation targets
         // itself, with the same hashes as the GPU (deterministic twins)
         this.clouds = e.data.data;
+      } else if (e.data.type === 'testTone') {
+        this.testTone = e.data.data;
       }
     };
   }
 
+  /** Score every pool voice's salience and mark the top heroCount in
+   *  this.isHero, once per hop, before fillBed. Reads scoreCapOn/scoreAmp
+   *  as last recorded by the PREVIOUS hop's fillBed — or by the hero loop
+   *  for promoted voices (one-hop-stale scoring, by design — fillBed for
+   *  THIS hop hasn't run yet). A state
+   *  flip (capture gained/lost) is boosted for ~300ms: individually
+   *  audible arrivals/departures deserve a real voice, which is also the
+   *  designed mitigation for fillBed's documented ≤1-block capture-loss
+   *  gap (task-6-report.md) — the freshly-released voice gets promoted
+   *  right at the transition instant. Hysteresis (1.25x for the
+   *  currently-selected set) keeps the hero set from chattering.
+   *
+   *  Scoring rides a decaying PEAK-HOLD of amp, not the instantaneous
+   *  value: a free voice's own burst/gap renewal cycles as fast as
+   *  ~1.8·tau (18ms at the BASE_PARAMS tau=0.02, faster than the 80ms
+   *  fade), and v.amp is EXACTLY 0 for the whole gap of every generation
+   *  (including "dead" ones that lose the density lottery). Scoring on
+   *  that raw value would evict and re-admit the same voice every single
+   *  cycle — heroGain never settles at 1 and the crossfade leaks energy
+   *  out of the mix (measured 2-3.5dB low with the raw signal). Holding
+   *  the peak with the same ~300ms decay as `transition` lets a voice's
+   *  salience survive its own natural silences, so a voice that is
+   *  genuinely active stays selected continuously (gain climbs once and
+   *  stays there) instead of re-fading every burst. */
+  selectHeroes() {
+    const p = this.p;
+    const K = Math.min(POOL, p.heroCount | 0);
+    for (let k = 0; k < POOL; k++) {
+      const capNow = this.scoreCapOn[k] ? 1 : 0;
+      // a state flip is salient for ~300ms — single arrivals/departures
+      // are individually audible and deserve a real voice
+      if (capNow !== this.lastCap[k]) this.transition[k] = 1;
+      this.lastCap[k] = capNow;
+      this.transition[k] *= 0.965; // ~300ms at 94 hops/s
+      const amp = this.scoreAmp[k] * (capNow ? p.objectGain : p.fieldGain);
+      this.ampHold[k] = Math.max(amp, this.ampHold[k] * 0.965);
+      let s = this.ampHold[k] * (1 + 2 * this.transition[k]);
+      if (capNow) s *= 1.5; // playing an instrument leans on heroes
+      // hysteresis: current heroes keep a 1.25x advantage
+      if (this.heroTarget[k] > 0) s *= 1.25;
+      this.heroScore[k] = s;
+    }
+    // top-K by score (POOL=256: simple selection is fine at 94Hz)
+    for (let k = 0; k < POOL; k++) this.heroTarget[k] = 0;
+    for (let pick = 0; pick < K; pick++) {
+      let best = -1;
+      let bestS = 0.0002;
+      for (let k = 0; k < POOL; k++) {
+        if (this.heroTarget[k] === 0 && this.heroScore[k] > bestS) {
+          best = k;
+          bestS = this.heroScore[k];
+        }
+      }
+      if (best < 0) break;
+      this.heroTarget[best] = 1;
+    }
+    for (let k = 0; k < POOL; k++) {
+      this.isHero[k] = this.heroTarget[k] > 0 || this.heroGain[k] > 0.001 ? 1 : 0;
+      // fully out of the hero set: the hero-side state goes stale from
+      // here on, so the next promotion must re-anchor it (heroActive)
+      if (!this.isHero[k]) this.heroActive[k] = 0;
+    }
+  }
+
+  /** Bed content for the hop starting at app-time tHop. Tasks 5-6 fill
+   *  this with the pool; Task 4 ships a single test blob. */
+  fillBed(tHop) {
+    this.poolSounding = 0;
+    if (this.testTone) {
+      const f = this.testTone.freq;
+      const bin = (f * BLOCK) / sampleRate;
+      const ph = (2 * Math.PI * f * tHop) % (2 * Math.PI);
+      splatBlob(this.bedReL, this.bedImL, BLOCK, bin, this.testTone.amp, ph, this.ker);
+      splatBlob(this.bedReR, this.bedImR, BLOCK, bin, this.testTone.amp, ph, this.ker);
+      return;
+    }
+    const p = this.p;
+    const W = Math.max(1, p.particleCount / POOL);
+    const wFree = Math.sqrt(W) * p.fieldGain;
+    const tEnd = tHop + BLOCK / sampleRate;
+    const spat = this.bedSpat;
+    const anyObjects = p.objects.some((o) => o && o.level > 0.001);
+    const blockT = BLOCK / sampleRate;
+    for (let k = 0; k < POOL; k++) {
+      // complementary crossfade with the hero path: the bed renders this
+      // voice at (1 − heroGain) while the hero loop renders it at
+      // heroGain. LINEAR complements (not equal-power) are correct here
+      // because the bed's slot-anchored phases are exact — bed and hero
+      // render nearly the SAME signal, so the two gains must sum to 1 to
+      // reconstruct it (a hard isHero skip here dropped the bed share
+      // instantly at promotion while heroGain was still ramping from 0:
+      // an 80ms energy dip per promotion, mirror-image gap on demotion —
+      // worst at high W where one pool voice is a big mix component).
+      // heroGain is read at hop start, ≤1 hop (10.7ms) stale within the
+      // 80ms ramp — accepted. A fully-promoted voice costs the bed
+      // nothing (the continue below).
+      const bedG = 1 - this.heroGain[k];
+      if (bedG <= 0.001) continue;
+      const v = this.voices[k];
+      // the bed derives into the voice's bed-owned struct, never into the
+      // hero-rendered fields — fillBed's cursor runs ahead of the hero
+      // loop's clock, and during a crossfade both renderers process this
+      // voice (see the Voice.bed comment)
+      const s = v.bed;
+      let sounding = false; // did this voice splat anything this hop?
+
+      // captured branch: a captured voice sings on its OBJECT's clock
+      // instead of free bursts, mirroring the hero path's captured ? : free
+      // split. Coherence rule: amplitude scales sqrt(W) at sync=0 (energy-
+      // correct — independent voices sum incoherently) to W at sync=1
+      // (amplitude-correct — synced voices share a real clock and their
+      // splats interfere constructively, so order becomes audible pitch).
+      if (anyObjects) this.evaluateCapture(v, tHop, spat, s);
+      else s.capOn = 0;
+      if (s.capOn) {
+        let o = p.objects[s.asg];
+        let wCap = (Math.sqrt(W) + (W - Math.sqrt(W)) * o.sync) * p.objectGain;
+        // every object cycle whose burst overlaps this block. The counter
+        // and bounds index the CURRENT assignment's cycle scheme; a
+        // mid-block handoff to a DIFFERENT object (different tau/sync)
+        // rebases them — mixing the old counter with the new params would
+        // render a burst at no real cycle boundary. Iterations are capped
+        // so a pathological reassignment ping-pong can't spin: with the
+        // ingestion tau floor (0.0005s, mirroring the GPU clamp) the worst
+        // real case is 21.33ms/0.0005 ≈ 43 cycles per block, so 128 is
+        // ~3× margin over the floored minimum.
+        let gO = Math.floor(tHop * s.asgInvTau + s.asgPhi);
+        let gOEnd = Math.floor(tEnd * s.asgInvTau + s.asgPhi);
+        let iter = 0;
+        for (; gO <= gOEnd && ++iter <= 128; gO++) {
+          if (gO !== s.asgGen) {
+            // re-evaluate at the cycle's midpoint — the same reach/lottery
+            // test the hero path runs at each cycle boundary
+            const prevAsg = s.asg;
+            const prevInvTau = s.asgInvTau;
+            const prevPhi = s.asgPhi;
+            this.evaluateCapture(v, (gO + 0.5 - prevPhi) / prevInvTau, spat, s);
+            // KNOWN GAP (deferred, reviewed): when capture is lost here,
+            // the `continue` after this loop still skips the free path for
+            // the REST of this block, where the legacy engine resumes free
+            // bursts sample-exactly — a silent gap bounded by ONE block
+            // (~21ms) at the release instant. Deferred because the hero
+            // selector (next task) promotes freshly-released voices to
+            // sample-accurate heroes at exactly these transition moments,
+            // covering the audible surface. See task-6-report.md.
+            if (!s.capOn) break;
+            if (s.asg !== prevAsg || s.asgInvTau !== prevInvTau || s.asgPhi !== prevPhi) {
+              // mid-block HANDOFF: the voice now belongs to an object with
+              // a different cycle scheme. Rebase counter, bounds and the
+              // sync-scaled weight onto the new assignment, resuming from
+              // the yet-unrendered portion of the block (the old cycle's
+              // start clamped to tHop); −1 because the for-increment lands
+              // on the new scheme's first cycle.
+              o = p.objects[s.asg];
+              wCap = (Math.sqrt(W) + (W - Math.sqrt(W)) * o.sync) * p.objectGain;
+              const tCursor = Math.max(tHop, (gO - prevPhi) / prevInvTau);
+              gO = Math.floor(tCursor * s.asgInvTau + s.asgPhi) - 1;
+              gOEnd = Math.floor(tEnd * s.asgInvTau + s.asgPhi);
+              continue;
+            }
+          }
+          const cycStart = (gO - s.asgPhi) / s.asgInvTau;
+          const cycLen = 1 / s.asgInvTau;
+          const bStart = cycStart;
+          const bLen = 0.6 * cycLen; // duty 0.6, matching the hero path's
+          // aa = (xO - asgGen) / 0.6
+
+          // same Gabor-true two-regime rendering as the free path below:
+          // a short burst IS a grain — one designated-hop splat carrying
+          // the full burst energy; a long burst spans hops — interior hops
+          // use the base (window-limited) kernel with COLA, edge slices use
+          // a duration-bucketed grain kernel recentered at the slice.
+          let amp;
+          let gker;
+          let shift = 0;
+          const envO = this.objEnvLUT[s.asg] || this.envLUT;
+          if (bLen < blockT) {
+            const pc = (bStart + bLen / 2 - tHop) * sampleRate;
+            if (pc < HOP / 2 || pc >= HOP / 2 + HOP) continue;
+            const envRMS = OceanTwinProcessor.envSegRMS(envO, 0, 1);
+            amp = s.capAmp * wCap * envRMS * Math.SQRT2
+              * Math.sqrt(bLen / blockT) * GRAIN_COLA * BED_CAL;
+            let bi = Math.round(Math.log2(bLen * sampleRate)) - GRAIN_LOG2_MIN;
+            if (bi < 0) bi = 0;
+            else if (bi >= GRAIN_BUCKETS.length) bi = GRAIN_BUCKETS.length - 1;
+            gker = this.grainKers[bi];
+            shift = pc - BLOCK / 2;
+          } else {
+            const s0 = Math.max(bStart, tHop);
+            const s1 = Math.min(bStart + bLen, tEnd);
+            if (s1 <= s0) continue;
+            const a0 = (s0 - bStart) / bLen;
+            const a1 = (s1 - bStart) / bLen;
+            const envRMS = OceanTwinProcessor.envSegRMS(envO, a0, a1);
+            const overlap = (s1 - s0) / blockT;
+            amp = s.capAmp * wCap * envRMS * Math.SQRT2 * Math.sqrt(overlap) * BED_CAL;
+            if (bStart <= tHop && bStart + bLen >= tEnd) {
+              gker = this.ker; // interior hop: window-limited, COLA carries env
+            } else {
+              let bi = Math.round(Math.log2((s1 - s0) * sampleRate)) - GRAIN_LOG2_MIN;
+              if (bi < 0) bi = 0;
+              else if (bi >= GRAIN_BUCKETS.length) bi = GRAIN_BUCKETS.length - 1;
+              gker = this.grainKers[bi];
+              const pc = ((s0 + s1) / 2 - tHop) * sampleRate;
+              shift = pc - BLOCK / 2;
+              amp *= this.win[Math.min(BLOCK - 1, pc | 0)] * GRAIN_COLA;
+            }
+          }
+          amp *= bedG; // bed's complement of the hero crossfade
+          if (amp <= 0.0002) continue;
+          sounding = true;
+          const bin = (s.capFreq * BLOCK) / sampleRate;
+          // REAL phase on the OBJECT timeline — the legacy captured
+          // oscillator's exact closed form: capPhase resets to 0 at each
+          // cycle's first rendered sample (evaluateCapture on assignment/
+          // cycle change) and free-runs from there until the next reset —
+          // the captured counterpart of the free path's slot-anchored
+          // phase above. anchor = the first sample time at/after cycStart,
+          // matching the per-sample engine's discretization exactly; −π/2
+          // turns the anchored sine into this splat's cosine convention.
+          // Synced voices (same object, same cycle) share this anchor, so
+          // their splats interfere constructively — order becomes pitch.
+          const anchor = Math.ceil(cycStart * sampleRate) / sampleRate;
+          const ph = (2 * Math.PI * s.capFreq * (tHop - anchor) - Math.PI / 2) % (2 * Math.PI);
+          // same two-wavetable 1/peak blend as the free path, on the
+          // captured recipe/timbre fields
+          const sat = s.capSat;
+          const tf = s.capTableFrac;
+          const invPA = this.wheelInvPeak[s.capTableA];
+          const invPB = this.wheelInvPeak[s.capTableB];
+          const fc = (1 - sat) + sat * ((1 - tf) * invPA + tf * invPB);
+          splatBlob(this.bedReL, this.bedImL, BLOCK, bin, amp * fc * s.capPanL, ph, gker, shift);
+          splatBlob(this.bedReR, this.bedImR, BLOCK, bin, amp * fc * s.capPanR, ph, gker, shift);
+
+          if (sat > 0.01) {
+            for (let side = 0; side < 2; side++) {
+              const rec = RECIPES[side === 0 ? s.capTableA : s.capTableB];
+              const w = sat * (side === 0 ? (1 - tf) * invPA : tf * invPB);
+              for (let q = 1; q < rec.length; q++) { // q=0 is the fundamental
+                const [hh, ha] = rec[q];
+                const fb = (s.capFreq * hh * BLOCK) / sampleRate;
+                if (fb >= BLOCK / 2 - KERNEL_HW) break;
+                const pa = amp * w * ha;
+                if (pa <= 0.000002) continue;
+                const php = (2 * Math.PI * s.capFreq * hh * (tHop - anchor) - Math.PI / 2) % (2 * Math.PI);
+                splatBlob(this.bedReL, this.bedImL, BLOCK, fb, pa * s.capPanL, php, gker, shift);
+                splatBlob(this.bedReR, this.bedImR, BLOCK, fb, pa * s.capPanR, php, gker, shift);
+              }
+            }
+          }
+        }
+        if (sounding) this.poolSounding++;
+        // record the scoring inputs for selectHeroes (one-hop-stale, by
+        // design) — it must not read hero-owned Voice state for this voice
+        this.scoreCapOn[k] = s.capOn;
+        this.scoreAmp[k] = s.capOn ? s.capAmp : s.amp;
+        continue; // captured: skip the free-burst section
+      }
+
+      const invLFree = (1 / p.tau) / (v.slotJitter * 1.8);
+      // every free generation whose burst overlaps this block
+      let g = Math.floor(tHop * invLFree + v.phi);
+      const gEnd = Math.floor(tEnd * invLFree + v.phi);
+      for (; g <= gEnd; g++) {
+        if (g !== s.gen) this.refreshFreeGeneration(v, g, spat, s);
+        if (s.amp <= 0.0002) continue;
+        const slotStart = (g - v.phi) / invLFree;
+        const slotLen = 1 / invLFree;
+        const bStart = slotStart + s.offN * slotLen;
+        const bLen = s.durN * slotLen;
+        // Gabor-true rendering, two regimes by burst duration:
+        //
+        // SHORT burst (fits inside one analysis window): the burst IS a
+        // grain — splat it ONCE, in the single hop whose mid-strip
+        // [tHop+HOP/2, tHop+3·HOP/2) holds the burst center, carrying the
+        // FULL burst energy, with the duration-bucketed grain kernel
+        // (short grains are broadband because Gabor says so) recentered
+        // at the burst's true position (splat `shift`). One splat = one
+        // grain: no inter-window decomposition, so no approximation-tail
+        // interference. (Letting overlapping hops share the burst was
+        // measured to grow a cos²(π·δ/2) comb — identical pulses anchored
+        // at each hop origin — and after position-restoring them, +5-7dB
+        // splatter at 1.5-3 bins from imperfect tail cancellation between
+        // the windows' approximate slice shapes. See task-5-report.md.)
+        //
+        // LONG burst (spans windows): interior hops use the base kernel —
+        // there the ANALYSIS WINDOW is the shorter Gabor scale, and
+        // per-hop envSegRMS with COLA is the envelope reconstruction.
+        // Edge slices are grains of the overlap's duration, recentered at
+        // the slice position and weighted by the window's value there
+        // (COLA in amplitude, so the hops sum to one burst).
+        //
+        // GRAIN_COLA = sqrt(BLOCK/Σwin²) converts the base-kernel energy
+        // convention (energy spread across the whole windowed block) to a
+        // pulse of the grain's own duration; the kernel family is energy-
+        // normalized to the base kernel, so envSegRMS·√overlap·√2 keeps
+        // carrying the energy and one BED_CAL calibrates every path.
+        let amp;
+        let gker;
+        let shift = 0;
+        const blockT = BLOCK / sampleRate;
+        if (bLen < blockT) {
+          // designated-hop single splat; the mid-strip guarantees the
+          // pulse center lies in [HOP/2, HOP/2+HOP) — bursts up to HOP
+          // never wrap, longer ones wrap at most BLOCK/4 (accepted: the
+          // wrap is a <21ms time alias at the same frequencies)
+          const pc = (bStart + bLen / 2 - tHop) * sampleRate;
+          if (pc < HOP / 2 || pc >= HOP / 2 + HOP) continue;
+          const envRMS = OceanTwinProcessor.envSegRMS(this.envLUT, 0, 1);
+          amp = s.amp * wFree * envRMS * Math.SQRT2
+            * Math.sqrt(bLen / blockT) * GRAIN_COLA * BED_CAL;
+          let bi = Math.round(Math.log2(bLen * sampleRate)) - GRAIN_LOG2_MIN;
+          if (bi < 0) bi = 0;
+          else if (bi >= GRAIN_BUCKETS.length) bi = GRAIN_BUCKETS.length - 1;
+          gker = this.grainKers[bi];
+          shift = pc - BLOCK / 2;
+        } else {
+          const s0 = Math.max(bStart, tHop);
+          const s1 = Math.min(bStart + bLen, tEnd);
+          if (s1 <= s0) continue;
+          const a0 = (s0 - bStart) / bLen;
+          const a1 = (s1 - bStart) / bLen;
+          const envRMS = OceanTwinProcessor.envSegRMS(this.envLUT, a0, a1);
+          // sqrt(2): blob amp is a cosine peak; envRMS carries the
+          // window's share of the burst's power into this block
+          const overlap = (s1 - s0) / blockT;
+          amp = s.amp * wFree * envRMS * Math.SQRT2 * Math.sqrt(overlap) * BED_CAL;
+          if (bStart <= tHop && bStart + bLen >= tEnd) {
+            gker = this.ker; // interior hop: window-limited, COLA carries env
+          } else {
+            let bi = Math.round(Math.log2((s1 - s0) * sampleRate)) - GRAIN_LOG2_MIN;
+            if (bi < 0) bi = 0;
+            else if (bi >= GRAIN_BUCKETS.length) bi = GRAIN_BUCKETS.length - 1;
+            gker = this.grainKers[bi];
+            const pc = ((s0 + s1) / 2 - tHop) * sampleRate;
+            shift = pc - BLOCK / 2;
+            amp *= this.win[Math.min(BLOCK - 1, pc | 0)] * GRAIN_COLA;
+          }
+        }
+        amp *= bedG; // bed's complement of the hero crossfade
+        if (amp <= 0.0002) continue;
+        sounding = true;
+        const bin = (s.freeFreq * BLOCK) / sampleRate;
+        // SLOT-ANCHORED phase, the legacy oscillator's closed form: the
+        // per-sample engine resets v.phase = 0 at each generation's first
+        // sample and plays the sine table from there, so every burst's
+        // carrier is sin(2πf·(t − anchor)) with anchor = the first sample
+        // at/after slotStart. A voice's bursts are therefore mutually
+        // COHERENT — the burst train has a comb spectrum with destructive
+        // interference between its lines. A hash-random per-burst phase
+        // (the earlier salt-1201 formula) replaces that comb with an
+        // incoherent pedestal: measured +11dB at off-fundamental probes
+        // and -3..-11dB elsewhere when the same randomization is applied
+        // to the legacy engine itself (task-5-report.md, fix round 2) —
+        // no spectral kernel can repair a phase-statistics mismatch. The
+        // continuous-tone phase advance across hops (2πf·tHop) lives on
+        // inside this expression; −π/2 turns the anchored sine into this
+        // splat's cosine convention.
+        const anchor = Math.ceil(slotStart * sampleRate) / sampleRate;
+        const ph = (2 * Math.PI * s.freeFreq * (tHop - anchor) - Math.PI / 2) % (2 * Math.PI);
+        // the hot loop plays pure·(1−sat) + rich·sat where rich blends TWO
+        // peak-normalized wavetables: tA·(1−tf) + tB·tf. Splat the same
+        // mix: the fundamental (present in every table at a=1) carries
+        // (1−sat) + sat·((1−tf)/peakA + tf/peakB); partial h of table T
+        // carries sat·wT·a_h/peakT. Same harmonic in both tables rides the
+        // same anchored phase, so two splats add exactly like the tables.
+        const sat = s.freeSat;
+        const tf = s.freeTableFrac;
+        const invPA = this.wheelInvPeak[s.freeTableA];
+        const invPB = this.wheelInvPeak[s.freeTableB];
+        const fc = (1 - sat) + sat * ((1 - tf) * invPA + tf * invPB);
+        splatBlob(this.bedReL, this.bedImL, BLOCK, bin, amp * fc * s.panL, ph, gker, shift);
+        splatBlob(this.bedReR, this.bedImR, BLOCK, bin, amp * fc * s.panR, ph, gker, shift);
+
+        if (sat > 0.01) {
+          for (let side = 0; side < 2; side++) {
+            const rec = RECIPES[side === 0 ? s.freeTableA : s.freeTableB];
+            const w = sat * (side === 0 ? (1 - tf) * invPA : tf * invPB);
+            for (let q = 1; q < rec.length; q++) { // q=0 is the fundamental
+              const [hh, ha] = rec[q];
+              const fb = (s.freeFreq * hh * BLOCK) / sampleRate;
+              if (fb >= BLOCK / 2 - KERNEL_HW) break;
+              // NB: no 0.0002 gate here — the per-sample engine gates the
+              // whole VOICE, never individual partials; typical partial
+              // amps (~1e-4) sit under the voice gate, and cutting them
+              // hollowed the top octaves out of the bed. The guard below
+              // only skips true silence.
+              const pa = amp * w * ha;
+              if (pa <= 0.000002) continue;
+              // the wavetable's partials ride the SAME anchored phase
+              // accumulator: sin(h·2πf·(t − anchor)) per harmonic
+              const php = (2 * Math.PI * s.freeFreq * hh * (tHop - anchor) - Math.PI / 2) % (2 * Math.PI);
+              splatBlob(this.bedReL, this.bedImL, BLOCK, fb, pa * s.panL, php, gker, shift);
+              splatBlob(this.bedReR, this.bedImR, BLOCK, fb, pa * s.panR, php, gker, shift);
+            }
+          }
+        }
+      }
+      if (sounding) this.poolSounding++;
+      // scoring inputs for selectHeroes, free-path shape (capOn is 0 here)
+      this.scoreCapOn[k] = 0;
+      this.scoreAmp[k] = s.amp;
+    }
+  }
+
+  synthesizeHop() {
+    this.selectHeroes(); // coherent hero mask for the whole hop, before fillBed
+    this.bedReL.fill(0); this.bedImL.fill(0);
+    this.bedReR.fill(0); this.bedImR.fill(0);
+    this.fillBed(this.bedTime);
+    this.fftEngine.ifft(this.bedReL, this.bedImL);
+    this.fftEngine.ifft(this.bedReR, this.bedImR);
+    const m = this.ringL.length - 1; // 4096 is a power of two
+    for (let i = 0; i < HOP; i++) {
+      this.ringL[(this.ringWrite + i) & m] = this.olaL[i] + this.bedReL[i];
+      this.ringR[(this.ringWrite + i) & m] = this.olaR[i] + this.bedReR[i];
+      this.olaL[i] = this.bedReL[i + HOP];
+      this.olaR[i] = this.bedReR[i + HOP];
+    }
+    this.ringWrite += HOP;
+    this.bedTime += HOP / sampleRate;
+  }
+
   ensureVoices() {
-    if (this.voices.length === VOICES && this.builtStride === this.p.stride) return;
+    if (this.voices.length === POOL && this.builtStride === this.p.stride) return;
     this.builtStride = this.p.stride;
     this.voices = [];
-    for (let k = 0; k < VOICES; k++) this.voices.push(new Voice(k * this.p.stride));
+    for (let k = 0; k < POOL; k++) this.voices.push(new Voice(k * this.p.stride));
     this.paramsDirty = true;
   }
 
@@ -247,7 +806,35 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       const uw = Math.pow(aa, c);
       lut[j] = Math.pow(Math.max(0, 4 * uw * (1 - uw)), k);
     }
-    return lut;
+    // cum2[j] = sum of lut[0..j-1]^2 — segment mean-square in O(1)
+    const cum2 = new Float32Array(ENV_LUT_SIZE + 2);
+    for (let j = 0; j <= ENV_LUT_SIZE; j++) cum2[j + 1] = cum2[j] + lut[j] * lut[j];
+    return { lut, cum2 };
+  }
+
+  /** Bake the grain-kernel family from the current envelope LUT: one
+   *  magnitude-spectrum kernel per duration bucket, energy-normalized to
+   *  the base kernel so envSegRMS·√overlap·√2·BED_CAL keeps carrying the
+   *  energy (the kernel carries only the SHAPE). One FFT per bucket, no
+   *  allocation — called only when smear/asymmetry actually changed. */
+  bakeGrainFamily() {
+    const lut = this.envLUT.lut;
+    const env = this.grainEnvScratch;
+    for (let b = 0; b < GRAIN_BUCKETS.length; b++) {
+      const d = GRAIN_BUCKETS[b];
+      for (let j = 0; j < d; j++) env[j] = lut[((j / d) * ENV_LUT_SIZE) | 0];
+      bakeGrainKernel(
+        this.grainKers[b], env, d, this.win, this.fftEngine,
+        this.grainScratchRe, this.grainScratchIm, this.kerBaseEnergy,
+      );
+    }
+  }
+
+  /** RMS of env over the normalized-age segment [a0,a1] ⊂ [0,1]. */
+  static envSegRMS(env, a0, a1) {
+    const j0 = Math.max(0, Math.min(ENV_LUT_SIZE, (a0 * ENV_LUT_SIZE) | 0));
+    const j1 = Math.max(j0 + 1, Math.min(ENV_LUT_SIZE + 1, Math.ceil(a1 * ENV_LUT_SIZE)));
+    return Math.sqrt((env.cum2[j1] - env.cum2[j0]) / (j1 - j0));
   }
 
   refreshDerived() {
@@ -255,6 +842,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const n = this.wheel.length;
 
     this.envLUT = OceanTwinProcessor.bakeEnv(p.smear, p.asymmetry);
+    // grain kernels depend only on the envelope SHAPE — tint/density and
+    // other 60 Hz params churn must not trigger FFTs
+    if (p.smear !== this.bakedSmear || p.asymmetry !== this.bakedAsym) {
+      this.bakedSmear = p.smear;
+      this.bakedAsym = p.asymmetry;
+      this.bakeGrainFamily();
+    }
     this.objEnvLUT = [];
     for (let m = 0; m < p.objects.length; m++) {
       const o = p.objects[m];
@@ -263,7 +857,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         p.asymmetry + (o.asymV - p.asymmetry) * o.asymW,
       );
     }
-    for (let k = 0; k < VOICES; k++) {
+    for (let k = 0; k < POOL; k++) {
       const v = this.voices[k];
       // the particle's actual color: mix(tint, per-particle random, colorRandom)
       const cr = p.colorRandom;
@@ -295,17 +889,22 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  this voice's free position may claim it (per-cycle lottery on the
    *  object's clock, threshold claim·level); lowest slot wins; each cycle
    *  lands on a FRESH random constellation point. Called at block start
-   *  and on the assigned object's cycle wraps. */
-  evaluateCapture(v, t, spat) {
+   *  and on the assigned object's cycle wraps.
+   *
+   *  Derives into the explicit target `s`: the hero loop passes the Voice
+   *  itself; fillBed passes `v.bed`, because its cursor runs ahead of the
+   *  hero clock and must never touch hero-rendered state (immutable
+   *  identity fields — i, phi, rgbRand, sizeRoll — still read from v). */
+  evaluateCapture(v, t, spat, s) {
     const p = this.p;
     let pick = -1;
     let gPick = 0;
     for (let m = 0; m < p.objects.length; m++) {
       const o = p.objects[m];
       if (!o || o.level <= 0.001) continue;
-      const dx = v.fx - o.centerX;
-      const dy = v.fy - o.centerY;
-      const dz = v.fz - o.centerZ;
+      const dx = s.fx - o.centerX;
+      const dy = s.fy - o.centerY;
+      const dz = s.fz - o.centerZ;
       if (dx * dx + dy * dy + dz * dz > o.reach * o.reach) continue;
       const g = Math.floor(t / o.tau + v.phi * (1 - o.sync));
       if (h2(v.i, g, 431 + m * 17) < o.claim * o.level) {
@@ -314,23 +913,23 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         break;
       }
     }
-    if (pick === v.asg && (pick < 0 || gPick === v.asgGen)) return;
-    v.asg = pick;
+    if (pick === s.asg && (pick < 0 || gPick === s.asgGen)) return;
+    s.asg = pick;
     if (pick < 0) {
-      v.capOn = 0;
+      s.capOn = 0;
       return;
     }
     const o = p.objects[pick];
     const cloud = this.clouds[pick];
-    v.asgGen = gPick;
-    v.asgInvTau = 1 / o.tau;
-    v.asgPhi = v.phi * (1 - o.sync);
-    v.capPhase = 0;
+    s.asgGen = gPick;
+    s.asgInvTau = 1 / o.tau;
+    s.asgPhi = v.phi * (1 - o.sync);
+    s.capPhase = 0;
     if (!cloud && (o.kind === 9 || o.kind === 10)) {
-      v.capOn = 0;
+      s.capOn = 0;
       return;
     }
-    v.capOn = 1;
+    s.capOn = 1;
     // fresh random landing this cycle — ANALYTIC per shape kind, same
     // hashes as the GPU (bit-exact twins). No stored point sets.
     const r1 = h2(v.i, gPick, 517 + pick * 29);
@@ -425,58 +1024,61 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const ambG = p.tint[1] * (1 - acr) + v.rgbRand[1] * acr;
     const ambB = p.tint[2] * (1 - acr) + v.rgbRand[2] * acr;
     const w = Math.max(o.tintW, imgW * o.level);
-    const [h, s, val] = rgbToHsv(
+    const [h, sat, val] = rgbToHsv(
       ambR * (1 - w) + scatR * w,
       ambG * (1 - w) + scatG * w,
       ambB * (1 - w) + scatB * w,
     );
     const n = this.wheel.length;
     // captured hue -> pitch (object octave transposes); size -> recipe
-    v.capFreq = Math.min(hueToFreq(h) * o.pitchMul, sampleRate * 0.45);
+    s.capFreq = Math.min(hueToFreq(h) * o.pitchMul, sampleRate * 0.45);
     const srEff = p.sizeRandom + (o.srV - p.sizeRandom) * o.srW;
     const scaleBase = o.scaleBlend;
     const wheelPos = ((scaleBase + (v.sizeRoll - 0.5) * srEff + 10) % 1) * n;
-    v.capTableA = Math.floor(wheelPos) % n;
-    v.capTableB = (v.capTableA + 1) % n;
-    v.capTableFrac = wheelPos - Math.floor(wheelPos);
-    v.capSat = s;
-    v.capBright = 0.35 + 0.65 * val;
+    s.capTableA = Math.floor(wheelPos) % n;
+    s.capTableB = (s.capTableA + 1) % n;
+    s.capTableFrac = wheelPos - Math.floor(wheelPos);
+    s.capSat = sat;
+    s.capBright = 0.35 + 0.65 * val;
     const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
-    v.capAmp = 0.13 * v.capBright * mag * o.gain * bassBoost(v.capFreq);
-    v.capPanL = bassMono(spat[0] / mag, v.capFreq);
-    v.capPanR = bassMono(spat[1] / mag, v.capFreq);
+    s.capAmp = 0.13 * s.capBright * mag * o.gain * bassBoost(s.capFreq);
+    s.capPanL = bassMono(spat[0] / mag, s.capFreq);
+    s.capPanR = bassMono(spat[1] / mag, s.capFreq);
   }
 
   /** New FREE-timeline generation: renewal process, matching the GPU —
    *  re-rolled burst duration and a random offset per slot, plus the
-   *  object-reach test for this voice's new free position. */
-  refreshFreeGeneration(v, g, spat) {
+   *  object-reach test for this voice's new free position.
+   *
+   *  Derives into the explicit target `s` (Voice on the hero path,
+   *  `v.bed` on the bed path — see evaluateCapture). */
+  refreshFreeGeneration(v, g, spat, s) {
     const p = this.p;
-    v.gen = g;
-    v.phase = 0;
-    v.durN = h2(v.i, g, 222) * 0.4 + 0.35;
-    v.offN = h2(v.i, g, 111) * (1 - v.durN);
-    v.fx = p.boundsMin[0] + h2(v.i, g, 101) * p.boundsSize[0];
-    v.fy = p.boundsMin[1] + h2(v.i, g, 202) * p.boundsSize[1];
-    v.fz = p.boundsMin[2] + h2(v.i, g, 331) * p.boundsSize[2];
+    s.gen = g;
+    s.phase = 0;
+    s.durN = h2(v.i, g, 222) * 0.4 + 0.35;
+    s.offN = h2(v.i, g, 111) * (1 - s.durN);
+    s.fx = p.boundsMin[0] + h2(v.i, g, 101) * p.boundsSize[0];
+    s.fy = p.boundsMin[1] + h2(v.i, g, 202) * p.boundsSize[1];
+    s.fz = p.boundsMin[2] + h2(v.i, g, 331) * p.boundsSize[2];
     // property fields DRESS without relocating: a free voice inside an
     // image's paper-thin slab takes that pixel's color (timbre/volume)
-    v.freeTableA = v.tableA;
-    v.freeTableB = v.tableB;
-    v.freeTableFrac = v.tableFrac;
-    v.freeSat = v.sat;
-    v.freeFreq = v.freq;
+    s.freeTableA = v.tableA;
+    s.freeTableB = v.tableB;
+    s.freeTableFrac = v.tableFrac;
+    s.freeSat = v.sat;
+    s.freeFreq = v.freq;
     let bright = v.bright;
     for (let m = 0; m < p.objects.length; m++) {
       const o = p.objects[m];
       if (!o || o.kind !== 1 || o.level <= 0.001) continue;
-      if (Math.abs(v.fx - o.centerX) > o.pa) continue;
-      if (Math.abs(v.fy - o.centerY) > o.pb) continue;
-      if (Math.abs(v.fz - o.centerZ) > o.pc * 0.5) continue;
+      if (Math.abs(s.fx - o.centerX) > o.pa) continue;
+      if (Math.abs(s.fy - o.centerY) > o.pb) continue;
+      if (Math.abs(s.fz - o.centerZ) > o.pc * 0.5) continue;
       const im = this.audioImages[m];
       if (!im) break;
-      const u = (v.fx - o.centerX) / (o.pa * 2) + 0.5;
-      const vv = 0.5 - (v.fy - o.centerY) / (o.pb * 2);
+      const u = (s.fx - o.centerX) / (o.pa * 2) + 0.5;
+      const vv = 0.5 - (s.fy - o.centerY) / (o.pb * 2);
       const ix = Math.min(im.size - 1, Math.max(0, Math.floor(u * im.size)));
       const iy = Math.min(im.size - 1, Math.max(0, Math.floor(vv * im.size)));
       const q = (iy * im.size + ix) * 4;
@@ -493,20 +1095,20 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       );
       // SWAPPED mapping: the dressed hue retunes the voice's pitch;
       // its recipe stays with the voice's size
-      v.freeFreq = hueToFreq(h);
-      v.freeSat = sSat;
+      s.freeFreq = hueToFreq(h);
+      s.freeSat = sSat;
       bright = 0.35 + 0.65 * val;
       break;
     }
     const alive = h2(v.i, g, 303) < p.density ? 1 : 0;
     if (alive) {
-      this.spatialize(v.fx, v.fy, v.fz, spat);
+      this.spatialize(s.fx, s.fy, s.fz, spat);
       const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
-      v.amp = 0.1 * bright * mag * bassBoost(v.freeFreq);
-      v.panL = bassMono(spat[0] / mag, v.freeFreq);
-      v.panR = bassMono(spat[1] / mag, v.freeFreq);
+      s.amp = 0.1 * bright * mag * bassBoost(s.freeFreq);
+      s.panL = bassMono(spat[0] / mag, s.freeFreq);
+      s.panR = bassMono(spat[1] / mag, s.freeFreq);
     } else {
-      v.amp = 0;
+      s.amp = 0;
     }
   }
 
@@ -524,24 +1126,60 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
 
     // slew the clock offset: hard resync only on a real jump, otherwise
     // creep at ~18ms/s — inaudible, but tracks perf-vs-audio clock drift
+    const prevOffset = this.smoothOffset;
     if (this.smoothOffset === null || Math.abs(p.timeOffset - this.smoothOffset) > 0.05) {
       this.smoothOffset = p.timeOffset;
     } else {
       const d = p.timeOffset - this.smoothOffset;
       this.smoothOffset += Math.max(-5e-5, Math.min(5e-5, d));
     }
+    // the bed timeline must follow the hero timeline through EVERY offset
+    // change — hard resync and slew alike. In a live session the first
+    // params message (carrying the real timeOffset, always ≫50ms) lands
+    // only after several process() quanta, so without this the hero clock
+    // jumps at that resync while bedTime keeps creeping by HOP/sampleRate
+    // from its old anchor — bed and heroes permanently on different
+    // clocks. On a hard resync the ≤512-sample ring tail was synthesized
+    // on the old timeline; letting it play out is accepted (one-time,
+    // ≤11ms, at session start when nothing meaningful is sounding yet).
+    if (this.bedTime !== null && prevOffset !== null && this.smoothOffset !== prevOffset) {
+      this.bedTime += this.smoothOffset - prevOffset;
+    }
+
+    const t0 = currentTime + this.smoothOffset;
+
+    // --- the mass: pull bed samples from the OLA ring ---
+    if (this.bedTime === null) this.bedTime = t0;
+    while (this.ringWrite - this.ringRead < n) this.synthesizeHop();
+    const mRing = this.ringL.length - 1;
+    for (let s = 0; s < n; s++) {
+      outL[s] = this.ringL[(this.ringRead + s) & mRing];
+      outR[s] = this.ringR[(this.ringRead + s) & mRing];
+    }
+    this.ringRead += n;
 
     const invTau = 1 / p.tau;
-    const t0 = currentTime + this.smoothOffset;
     const dt = 1 / sampleRate;
     const envLUT = this.envLUT;
     const objEnvLUT = this.objEnvLUT;
     const spat = [0, 0];
     const sine = this.sine;
-    let active = 0;
+    let activeHeroes = 0;
+    // a hero voice stands in for the SAME particle weight a bed voice
+    // would carry — without this the hero and bed renderings of the same
+    // voice differ by up to sqrt(W)..W (huge at high particleCount),
+    // clicking hard on every hero/bed handoff. Mirrors fillBed's wFree/
+    // wCap exactly (energy-correct at sync=0, amplitude-correct at
+    // sync=1); sqrtW alone is the free-path weight and also the safe
+    // (minimum) floor for the captured one.
+    const W = Math.max(1, p.particleCount / POOL);
+    const sqrtW = Math.sqrt(W);
+    const wFreeHero = sqrtW * p.fieldGain;
+    const gStep = 1 / (0.08 * sampleRate); // 80ms linear hero fade ramp
 
     const anyObjects = p.objects.some((o) => o && o.level > 0.001);
-    for (let k = 0; k < VOICES; k++) {
+    for (let k = 0; k < POOL; k++) {
+      if (!this.isHero[k]) continue; // pool voices live in the bed now
       const v = this.voices[k];
       // free slots are 1.8x tau (burst + silent gap), matching the GPU
       const invLFree = invTau / (v.slotJitter * 1.8);
@@ -549,15 +1187,51 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       let t = t0;
       // free timeline (always advancing — capture reach tests live on it)
       let gF = Math.floor(t * invLFree + v.phi);
-      if (gF !== v.gen) this.refreshFreeGeneration(v, gF, spat);
+      if (gF !== v.gen) this.refreshFreeGeneration(v, gF, spat, v);
       // absorption: which object (if any) claims this voice right now
-      if (anyObjects) this.evaluateCapture(v, t, spat);
+      if (anyObjects) this.evaluateCapture(v, t, spat, v);
       else v.capOn = 0;
-      if ((v.capOn ? v.capAmp : v.amp) > 0.0002) active++;
+
+      // PROMOTION CONTINUITY: first hero-loop entry since this voice last
+      // left the hero set. Its hero-side state was stale until the
+      // refresh/evaluate above rebuilt the CURRENT generation — but those
+      // reset the oscillator phases to 0, which mid-generation would be a
+      // foreign restart. Re-anchor them in closed form from the slot/
+      // cycle anchor instead (the SAME closed form fillBed splats with),
+      // so the hero waveform rises phase-continuous under the bed
+      // rendering it is crossfading against.
+      if (!this.heroActive[k]) {
+        this.heroActive[k] = 1;
+        const slotStartH = (v.gen - v.phi) / invLFree;
+        const aF = Math.ceil(slotStartH * sampleRate) / sampleRate;
+        v.phase = ((((t - aF) * v.freeFreq) % 1) + 1) % 1 * TABLE_SIZE;
+        if (v.capOn) {
+          const cycStartH = (v.asgGen - v.asgPhi) / v.asgInvTau;
+          const aO = Math.ceil(cycStartH * sampleRate) / sampleRate;
+          v.capPhase = ((((t - aO) * v.capFreq) % 1) + 1) % 1 * TABLE_SIZE;
+        }
+      }
+
+      if ((v.capOn ? v.capAmp : v.amp) > 0.0002) activeHeroes++;
+      // scoring inputs for selectHeroes: a promoted voice's fresh state
+      // lives here now (fillBed skips it once fully promoted), so the
+      // hero loop records what the bed would have recorded
+      this.scoreCapOn[k] = v.capOn ? 1 : 0;
+      this.scoreAmp[k] = v.capOn ? v.capAmp : v.amp;
+
+      const gTarget = this.heroTarget[k];
 
       // fast path: a silent voice with no generation boundary inside this
-      // block contributes nothing — skip its sample loop entirely
-      if (v.amp * p.fieldGain <= 0.0002 && (!anyObjects || v.capAmp * p.objectGain <= 0.0002)) {
+      // block contributes nothing — skip its sample loop entirely. A
+      // mid-fade voice (gain not yet settled at its target) may NOT use
+      // this skip: its gain must keep ramping every sample even through
+      // silence, or the fade stalls and the hero/bed handoff clicks.
+      // conservative bound: the real captured weight is at most W·objectGain
+      // (sync=1); using that upper bound here (rather than the exact
+      // per-object wCap) means this pre-check can only under-skip, never
+      // wrongly skip an audible voice.
+      if (v.amp * wFreeHero <= 0.0002 && (!anyObjects || v.capAmp * p.objectGain * W <= 0.0002)
+        && this.heroGain[k] <= 0.001 && this.heroTarget[k] === 0) {
         const tEnd = t0 + n * dt;
         const nextF = (v.gen + 1 - v.phi) / invLFree;
         const nextO = v.capOn ? (v.asgGen + 1 - v.asgPhi) / v.asgInvTau : Infinity;
@@ -574,9 +1248,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         const xF = t * invLFree + v.phi;
         const gFn = Math.floor(xF);
         if (gFn !== v.gen) {
-          this.refreshFreeGeneration(v, gFn, spat);
+          this.refreshFreeGeneration(v, gFn, spat, v);
           // new free position: capture eligibility may have changed
-          if (anyObjects) this.evaluateCapture(v, t, spat);
+          if (anyObjects) this.evaluateCapture(v, t, spat, v);
         }
 
         let captured = v.capOn;
@@ -584,14 +1258,24 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         if (captured) {
           xO = t * v.asgInvTau + v.asgPhi;
           if (Math.floor(xO) !== v.asgGen) {
-            this.evaluateCapture(v, t, spat);
+            this.evaluateCapture(v, t, spat, v);
             captured = v.capOn;
             if (captured) xO = t * v.asgInvTau + v.asgPhi;
           }
         }
 
-        // environment and instruments have separate faders
-        const amp = captured ? v.capAmp * p.objectGain : v.amp * p.fieldGain;
+        // environment and instruments have separate faders; captured/free
+        // each carry the SAME particle-weight the bed would give them
+        // (wCap/wFree, mirroring fillBed exactly) so a voice sounds the
+        // same whether it's rendered here or in the spectral tile
+        let amp;
+        if (captured) {
+          const o = p.objects[v.asg];
+          const wCap = (sqrtW + (W - sqrtW) * o.sync) * p.objectGain;
+          amp = v.capAmp * wCap;
+        } else {
+          amp = v.amp * wFreeHero;
+        }
         if (amp > 0.0002) {
           // captured: duty-gapped pulse on the object's clock (order);
           // free: jittered burst inside its slot (renewal — no clock)
@@ -601,7 +1285,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           if (aa > 0 && aa < 1) {
             // baked envelope — no pow in the hot loop
             const lutC = captured ? objEnvLUT[v.asg] || envLUT : envLUT;
-            const env = lutC[(aa * ENV_LUT_SIZE) | 0];
+            const env = lutC.lut[(aa * ENV_LUT_SIZE) | 0];
             if (env > 0.0001) {
               const idx = (captured ? v.capPhase : v.phase) & TABLE_MASK;
               const pure = sine[idx];
@@ -612,8 +1296,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
               const rich = tA[idx] * (1 - tf) + tB[idx] * tf;
               const osc = pure * (1 - sat) + rich * sat;
               const smp = osc * env * amp;
-              outL[s] += smp * (captured ? v.capPanL : v.panL);
-              outR[s] += smp * (captured ? v.capPanR : v.panR);
+              const hg = this.heroGain[k];
+              outL[s] += smp * hg * (captured ? v.capPanL : v.panL);
+              outR[s] += smp * hg * (captured ? v.capPanR : v.panR);
             }
           }
           // each timeline owns its oscillator phase — the free clock must
@@ -624,14 +1309,22 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             v.phase = (v.phase + (v.freeFreq / sampleRate) * TABLE_SIZE) % TABLE_SIZE;
           }
         }
+        // fade progresses every sample regardless of amp/env gating —
+        // a fade-out must reach zero even through an envelope's silence,
+        // or a dying hero could freeze mid-gain and pop when re-triggered
+        const hg0 = this.heroGain[k];
+        this.heroGain[k] = hg0 < gTarget
+          ? Math.min(gTarget, hg0 + gStep)
+          : Math.max(gTarget, hg0 - gStep);
         t += dt;
       }
     }
 
-    // rumble blocker (~35 Hz one-pole high-pass): burst envelopes shed
-    // infrasonic energy that has no business in the mix
+    // rumble blocker (25 Hz one-pole high-pass, coefficient baked in the
+    // constructor): burst envelopes shed infrasonic energy that has no
+    // business in the mix
     const R = this.hpR;
-    const gain = p.gain * 2.4;
+    const gain = p.gain * 2.4 * this.masterNorm;
     // limiter: ride the gain down instead of saturating — many loud
     // voices should get quieter together, not dirtier
     const LIM_THRESH = 0.8;
@@ -656,7 +1349,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
 
     if (++this.blockCounter >= REPORT_INTERVAL_BLOCKS) {
       this.blockCounter = 0;
-      this.port.postMessage({ type: 'stats', grains: active });
+      this.port.postMessage({
+        type: 'stats',
+        grains: activeHeroes,
+        bed: Math.round(this.poolSounding * Math.max(1, this.p.particleCount / POOL)),
+      });
     }
     return true;
   }

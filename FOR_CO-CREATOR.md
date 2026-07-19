@@ -17,6 +17,17 @@ OCEAN runs entirely in your web browser. There is nothing to install.
    if it says anything else, send that exact text to Wolgan.
    One more thing worth knowing: **color is pitch** — red is low,
    violet is high, like the spectrum of light.
+
+   The sound engine changed recently: it used to play a sample of the
+   world — only 256 particles, picked at random, standing in for
+   everything. Now it plays the WHOLE ocean — a few dozen of the
+   closest/most important particles as individual voices you can really
+   hear moving, and everything else as the true summed voice of the
+   whole sea, computed cheaply instead of one-by-one. It sounds fuller,
+   and it also means the app now runs on lighter computers — this is the
+   fix for the silence you had before, and it's also the path toward it
+   running on the Quest headset. Your local 64-voice patch is no longer
+   needed once this is merged — don't worry about keeping it around.
 4. Play:
    - **W / A / S / D** — move through the space, **Q / E** — down / up,
      hold **Shift** to move faster, **right-drag** the mouse to look around.
@@ -48,6 +59,17 @@ OCEAN działa w całości w przeglądarce. Niczego nie trzeba instalować.
    tekst Wolganowi.
    I jeszcze jedno, warto wiedzieć: **kolor to wysokość dźwięku** —
    czerwony jest nisko, fioletowy wysoko, jak widmo światła.
+
+   Silnik dźwięku ostatnio się zmienił: wcześniej grał tylko próbkę
+   świata — 256 losowo wybranych cząstek udających całą resztę. Teraz
+   gra CAŁY ocean — kilkadziesiąt najbliższych/najważniejszych cząstek
+   jako osobne, wyraźnie słyszalne głosy, a całą resztę jako prawdziwy,
+   zsumowany głos morza, policzony tanim kosztem zamiast cząstka po
+   cząstce. Brzmi pełniej, a przy okazji działa też na słabszych
+   komputerach — to naprawia ciszę, którą miałaś wcześniej, i to jest
+   też droga do działania na goglach Quest. Twoja lokalna łatka na 64
+   głosy nie jest już potrzebna po scaleniu tej zmiany — możesz się nią
+   nie przejmować.
 4. Graj:
    - **W / A / S / D** — poruszanie się, **Q / E** — dół / góra,
      **Shift** — szybciej, **prawy przycisk myszy + ruch** — rozglądanie.

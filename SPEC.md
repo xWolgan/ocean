@@ -139,8 +139,50 @@ An object = **constellation** (8192 targets, optional per-target colors)
 
 ## 7. Audio engine
 
-`public/granular-processor.js` (AudioWorklet, 256 voices = strided
-sample of real particles; bit-exact hash twin of the GPU).
+`public/granular-processor.js` (AudioWorklet, ES module) renders a pool
+of 256 hash-derived particle voices — the same PCG hashes, same clock as
+the GPU — through **three renderers**, per
+`docs/superpowers/specs/2026-07-14-spectral-tile-audio-design.md`
+(Stage 1; see that spec and `intents/wolgan--spectral-tile-audio.md`
+for the full design and its execution history):
+
+- **Hero voices**: the top `heroCount` (default 32, 0–256) of the pool,
+  chosen every hop by a salience score — a decaying peak-hold of
+  amplitude, a ~300 ms capture/release-transition boost, and 1.25×
+  hysteresis for the incumbent set — rendered sample-accurately by the
+  legacy per-voice oscillator, bit-exact with the GPU. Promotion/demotion
+  is an 80 ms complementary linear crossfade with the bed (bed renders
+  each voice at `1 − heroGain`; linear complements, not equal-power,
+  because bed and hero render nearly the same signal) so the two never
+  sum to more or less than one voice's energy.
+- **The spectral-tile bed**: every non-hero pool voice, rendered as a
+  1024-bin complex spectrum (512-sample hop, Hann-windowed overlap-add,
+  one IFFT per hop per ear) instead of per-sample synthesis. This is NOT
+  a statistical/analytic stand-in — burst phases are the legacy
+  oscillator's own closed-form slot-anchored phases (measurement showed
+  the per-generation phase reset makes burst trains coherent, which
+  retired the originally-planned hash-random "understudy" phase, salt
+  1201); grain kernels are duration-bucketed Gabor-true windows,
+  energy-normalized; captured (object-claimed) voices ride their
+  object's own clock with the same exact phases, so order (a synced
+  object pulsing at 1/tau) emerges by interference, not by modeling.
+  Verified against the frozen legacy engine: FFT band energy within
+  ±3 dB (bands 1–6) / ±1.5 dB (total); autocorrelation confirms captured
+  pulse trains lock at 1/tau in both engines alike.
+- **The legacy engine** (`public/granular-legacy.js`, frozen, ES module,
+  `?audio=legacy`): the pre-tile per-voice engine kept byte-frozen for
+  A/B/null-test comparison. Not used by default.
+
+A pool voice's weight (`sqrt(W)` incoherent while free, sync-interpolated
+toward `wCap` while captured) is carried by whichever renderer currently
+owns it — hero-vs-bed is a rendering choice, not a change in what the
+voice represents. `masterNorm = 1/sqrt(max(1, particleCount/256))`
+pins total loudness across the particle-count dial, computed at
+params-ingestion time and folded into the output gain alongside
+`p.gain * 2.4` — the particle-count slider is a performance dial, not a
+crescendo. Object tau is floored at 0.0005 s in the worklet, mirroring
+the GPU's clamp (twins agree at extreme parameter settings; the frozen
+legacy engine lacks this floor).
 
 - Voice = wavetable oscillator (2048-sample tables; pure sine ⟷ hue
   recipe crossfaded by saturation), windowed by the envelope LUT
@@ -165,6 +207,18 @@ sample of real particles; bit-exact hash twin of the GPU).
   / `suspended` / `FAILED: …`) — a non-technical tester can read it
   aloud for remote diagnosis.
 
+### 7.1 URL params
+
+- `?audio=legacy` — load the frozen pre-tile per-voice engine instead of
+  the pool/hero/bed engine, for A/B listening or null-test comparison.
+- `?probe=readback` — enable `src/field/ReadbackProbe.ts`, the Stage-2
+  gate measurement: a GPU-additive point cloud rendered into a small
+  float target, read back async and fenced (≤8 KB), reporting rolling
+  avg/max readback ms + queue depth on the stats overlay. Inert
+  otherwise; see `PERF.md` for results and boundary 9 below.
+- `?count=N` — pin particle count at page load without touching the
+  performance panel (used by the probes above for repeatable runs).
+
 ## 8. Compositor UI
 
 - WASD+QE fly (Shift fast), right-drag look, left hold = play selected.
@@ -182,14 +236,27 @@ sample of real particles; bit-exact hash twin of the GPU).
 
 ## 9. Boundaries & performance
 
-- 8 object slots; 8192 targets/object (curve tables); 256 audio voices;
-  particle count 16k–1M (default 131k); field 6×3×6 m; pitch range
-  55 Hz–3520 Hz from hue at octave 0 (sub-bass 20–80 Hz via object
-  octave −3); flash duration 1–100 ms × octave stretch.
+- 8 object slots; 8192 targets/object (curve tables); 256-particle audio
+  pool, of which `heroCount` (32 default, 0–256) render sample-accurately
+  as heroes and the rest render as the spectral-tile bed (§7); the bed
+  represents the app's real `particleCount`, weighted `sqrt(N/256)`
+  incoherent (free) / interpolating to `N/256` coherent (fully
+  synced/captured); particle count 16k–1M (default 131k); field 6×3×6 m;
+  pitch range 55 Hz–3520 Hz from hue at octave 0 (sub-bass 20–80 Hz via
+  object octave −3); flash duration 1–100 ms × octave stretch.
 - Verified: 60 fps at 131k particles on the WebGL2 fallback with 4
-  objects active; limiter holds peak <0.6 with all 256 voices at max.
+  objects active; limiter holds peak <0.6 with the full pool at max;
+  live probe at the app's default scene measured ~30 heroes + ~44k bed
+  voices sounding, audible energy correctly in-band (not rumble); offline
+  throughput 9.3× realtime at 524,288 particles (heroCount 48, tau 4 ms)
+  on Wolgan's desktop.
 - Target: standalone Quest 3 (probe procedure in README); WebGL2
-  fallback constraints in CLAUDE.md are hard requirements.
+  fallback constraints in CLAUDE.md are hard requirements. Stage 2 (GPU
+  splat pass feeding the tile directly, replacing the worklet's own
+  bed computation) is GATED on a readback-cost probe, not yet decided:
+  desktop WebGL2 fallback measured NO-GO (16.7 ms avg @131k particles vs
+  an 8 ms ceiling; unstable up to 417 ms avg @524k); the WebGPU path and
+  the Quest measurement are still open (see `PERF.md`).
 
 ## 10. Deploy & collaboration
 
