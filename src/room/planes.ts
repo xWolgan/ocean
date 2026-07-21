@@ -10,7 +10,6 @@ import { ROOM_CZ, ROOM_D } from './RoomScene';
 const MAX_PILE = 100;
 const PERIOD_S = 60;
 const FIRST_ARRIVAL_S = 8; // don't make her wait a minute to see one
-const FLIGHT_S = 5;
 const STORE_KEY = 'refroom.planes.v1';
 
 const PILE_CENTER_X = 1.15;
@@ -35,28 +34,39 @@ function dartGeometry(): THREE.BufferGeometry {
   return geo;
 }
 
-function bezier(
-  p0: THREE.Vector3,
-  p1: THREE.Vector3,
-  p2: THREE.Vector3,
-  p3: THREE.Vector3,
-  t: number,
-  out: THREE.Vector3,
-): THREE.Vector3 {
-  const u = 1 - t;
+/** approach fraction of the total flight time (rest is the indoor arc) */
+const APPROACH = 0.4;
+
+function flightPoint(f: Flight, t: number, out: THREE.Vector3): THREE.Vector3 {
+  if (t <= APPROACH) {
+    return out.lerpVectors(f.from, f.window, t / APPROACH);
+  }
+  const b = (t - APPROACH) / (1 - APPROACH);
+  const u = 1 - b;
   out.set(0, 0, 0);
-  out.addScaledVector(p0, u * u * u);
-  out.addScaledVector(p1, 3 * u * u * t);
-  out.addScaledVector(p2, 3 * u * t * t);
-  out.addScaledVector(p3, t * t * t);
+  out.addScaledVector(f.window, u * u);
+  out.addScaledVector(f.crest, 2 * u * b);
+  out.addScaledVector(f.rest, b * b);
   return out;
 }
 
 interface Flight {
   mesh: THREE.Mesh;
   t: number;
-  path: [THREE.Vector3, THREE.Vector3, THREE.Vector3, THREE.Vector3];
+  /** flight duration in seconds — every plane flies its own tempo */
+  dur: number;
+  /** phase A: straight approach from the ocean to the window mouth */
+  from: THREE.Vector3;
+  window: THREE.Vector3;
+  /** phase B: quadratic arc window → crest → pile; the crest control
+   *  point sits above the window, so the indoor path ALWAYS climbs
+   *  first, then glides down */
+  crest: THREE.Vector3;
+  rest: THREE.Vector3;
   restQuat: THREE.Quaternion;
+  wobbleFreq: number;
+  wobbleAmp: number;
+  wobblePhase: number;
 }
 
 export class PaperPlanes {
@@ -131,18 +141,32 @@ export class PaperPlanes {
   private launch(): void {
     const zN = ROOM_CZ - ROOM_D / 2;
     const rest = this.restPose(this.count);
-    const path: Flight['path'] = [
-      // born far out in the ocean, off to a random side
-      new THREE.Vector3((Math.random() - 0.5) * 4, 1.4 + Math.random() * 1.2, zN - 4.5 - Math.random() * 1.5),
-      // funnel through the window's heart (x=0, ~1.6 m)
-      new THREE.Vector3((Math.random() - 0.5) * 0.4, 1.5 + Math.random() * 0.5, zN - 0.6),
-      // a glide into the room, banking toward the pile
-      new THREE.Vector3(0.5, 1.1, zN + 1.4),
-      rest.pos,
-    ];
+    // enters lowish through the opening; the indoor arc then always
+    // climbs to a crest before gliding down to the pile
+    const entryY = 1.2 + Math.random() * 0.55;
     const mesh = new THREE.Mesh(this.geo, this.mat);
     this.group.add(mesh);
-    this.flight = { mesh, t: 0, path, restQuat: rest.quat };
+    this.flight = {
+      mesh,
+      t: 0,
+      dur: 2.6 + Math.random() * 1.2,
+      from: new THREE.Vector3(
+        (Math.random() - 0.5) * 5,
+        entryY - 0.25 + Math.random() * 0.5,
+        zN - 3 - Math.random() * 2.5,
+      ),
+      window: new THREE.Vector3((Math.random() - 0.5) * 0.7, entryY, zN),
+      crest: new THREE.Vector3(
+        -0.8 + Math.random() * 2.6,
+        entryY + 1.1 + Math.random() * 0.8,
+        zN + 1.4 + Math.random() * 1.8,
+      ),
+      rest: rest.pos,
+      restQuat: rest.quat,
+      wobbleFreq: 7 + Math.random() * 4,
+      wobbleAmp: 0.12 + Math.random() * 0.16,
+      wobblePhase: Math.random() * Math.PI * 2,
+    };
   }
 
   update(dt: number): void {
@@ -152,16 +176,17 @@ export class PaperPlanes {
       return;
     }
     const f = this.flight;
-    f.t = Math.min(1, f.t + dt / FLIGHT_S);
-    // ease-out: fast through the window, gentle to the floor
-    const e = 1 - (1 - f.t) * (1 - f.t);
-    bezier(...f.path, e, this._pos);
+    f.t = Math.min(1, f.t + dt / f.dur);
+    // near-constant pace with only a gentle settle at the very end —
+    // a dart flies briskly; only the last moment softens
+    const e = 0.75 * f.t + 0.25 * (1 - (1 - f.t) * (1 - f.t));
+    flightPoint(f, e, this._pos);
     f.mesh.position.copy(this._pos);
     if (f.t < 1) {
-      bezier(...f.path, Math.min(1, e + 0.02), this._ahead);
+      flightPoint(f, Math.min(1, e + 0.02), this._ahead);
       this._m.lookAt(this._ahead, this._pos, f.mesh.up);
       f.mesh.quaternion.setFromRotationMatrix(this._m);
-      f.mesh.rotateZ(Math.sin(f.t * 9) * 0.22); // paper wobble
+      f.mesh.rotateZ(Math.sin(f.t * f.wobbleFreq + f.wobblePhase) * f.wobbleAmp);
       return;
     }
     // touch down

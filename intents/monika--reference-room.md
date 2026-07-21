@@ -85,6 +85,15 @@ a line under it. No ceremony, nothing to break in the artwork.
   accrue at the same rate while the room is closed, so returning after
   an hour finds ~60 planes. Probe: arrivals steady at 65 s across dt
   sizes, pile peaked at exactly 100 children, cleared to 0, restarted.
+- flight feel, second pass (Monika: too slow, dove too soon): flights
+  are brisker (2.6-3.8 s, near-constant pace) and TWO-PHASE — straight
+  approach to the window mouth, then an indoor quadratic arc whose
+  crest control point sits 1.1-1.9 m above the entry, so every plane
+  demonstrably climbs after entering (measured 0.3-0.65 m, crest ~1 m
+  past the wall) before gliding down. Entries scatter across the whole
+  opening; tempo and wobble differ per plane. Lesson recorded: with one
+  cubic bezier the crest landed OUTSIDE the wall — the room only ever
+  saw the descent.
 - typeface: wall notes and captions set in Alegreya (SIL OFL; latin +
   latin-ext woff2 subsets bundled in src/room/, loaded via FontFace
   before views build). Note ink flipped to dark graphite — chalk-white
