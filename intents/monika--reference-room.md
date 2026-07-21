@@ -97,6 +97,8 @@ a line under it. No ceremony, nothing to break in the artwork.
 - pile moved deeper into the room (2.6 m off the window wall, x 1.5)
   so the indoor glide lasts and reads as real flight; duration up a
   notch (3.0-4.2 s), crest kept between window and pile.
+- window wall thickness up twice on request: 0.15 → 0.35 → 0.7 m — the
+  arch reads as a passage through a massive wall now.
 - typeface: wall notes and captions set in Alegreya (SIL OFL; latin +
   latin-ext woff2 subsets bundled in src/room/, loaded via FontFace
   before views build). Note ink flipped to dark graphite — chalk-white
