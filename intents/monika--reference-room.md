@@ -74,7 +74,9 @@ a line under it. No ceremony, nothing to break in the artwork.
   match), floor turned into a 3D-modeling-app grid — dark ground
   (#2b2e35), lines in the wall color, fine at 0.5 m, strong at 1 m.
 - third color pass: walls up again to near-white grey (#e4e6eb).
-- fourth: pure white walls + ceiling, to see how it feels.
+- fourth: pure white walls tried and rolled back — Monika keeps the
+  near-white grey; what she wanted white was the WRITING. Note ink is
+  white again (with a soft shadow so it holds on the light walls).
 - typeface: wall notes and captions set in Alegreya (SIL OFL; latin +
   latin-ext woff2 subsets bundled in src/room/, loaded via FontFace
   before views build). Note ink flipped to dark graphite — chalk-white

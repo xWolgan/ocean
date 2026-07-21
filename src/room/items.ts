@@ -219,8 +219,12 @@ export class ItemView {
       const tex = canvasTexture(
         (ctx, w) => {
           ctx.clearRect(0, 0, w, H);
-          // dark graphite — pencil on plaster (the walls are near-white)
-          ctx.fillStyle = '#2f333b';
+          // white ink (Monika's choice) — a soft dark shadow keeps it
+          // readable against the light grey walls
+          ctx.fillStyle = '#ffffff';
+          ctx.shadowColor = '#00000070';
+          ctx.shadowBlur = 5;
+          ctx.shadowOffsetY = 2;
           ctx.font = '34px Alegreya, serif';
           lines.forEach((l, i) => ctx.fillText(l, pad, pad + (i + 0.8) * lineH));
         },
