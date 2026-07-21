@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OCEAN — Reference Room</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #101014; }
+      canvas { display: block; }
+      #hint {
+        position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+        color: #8a94a6; font: 12px 'Consolas', monospace; z-index: 10;
+        pointer-events: none; text-align: center; text-shadow: 0 0 4px #000;
+      }
+      #toast {
+        position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+        color: #e8ecf4; background: #2a2f3acc; padding: 8px 16px;
+        border-radius: 6px; font: 13px 'Consolas', monospace; z-index: 30;
+        opacity: 0; transition: opacity 0.3s; pointer-events: none;
+      }
+      #panel {
+        position: fixed; top: 0; right: 0; width: 260px; height: 100%;
+        background: #191d24ee; color: #d5dbe6; z-index: 20;
+        font: 13px system-ui, sans-serif; padding: 14px; display: none;
+        flex-direction: column; gap: 10px; overflow-y: auto;
+      }
+      #panel h2 { font-size: 14px; font-weight: 600; color: #aeb8c9; }
+      #panel label { font-size: 11px; color: #8a94a6; display: block; margin-bottom: 3px; }
+      #panel textarea, #panel input[type='text'] {
+        width: 100%; background: #10131a; color: #e8ecf4; border: 1px solid #333a48;
+        border-radius: 4px; padding: 6px; font: 13px system-ui, sans-serif; resize: vertical;
+      }
+      #panel textarea { min-height: 64px; }
+      #panel button {
+        background: #2b3342; color: #e8ecf4; border: none; border-radius: 4px;
+        padding: 7px 10px; cursor: pointer; font: 13px system-ui, sans-serif;
+      }
+      #panel button:hover { background: #38445a; }
+      #panel button.danger { background: #4a2b2b; }
+      #panel button.danger:hover { background: #613434; }
+      #panel .row { display: flex; gap: 6px; align-items: center; }
+      #panel hr { border: none; border-top: 1px solid #2a2f3a; margin: 4px 0; }
+      #addbar {
+        position: fixed; top: 12px; left: 12px; z-index: 20; display: none; gap: 8px;
+      }
+      #addbar button {
+        background: #191d24dd; color: #d5dbe6; border: 1px solid #333a48;
+        border-radius: 6px; padding: 8px 12px; cursor: pointer;
+        font: 13px system-ui, sans-serif;
+      }
+      #addbar button:hover { background: #262c38; }
+      #lightbox {
+        position: fixed; inset: 0; background: #000000e0; z-index: 40;
+        display: none; align-items: center; justify-content: center;
+      }
+      #lightbox iframe {
+        width: min(80vw, 1120px); height: min(45vw, 630px); border: none;
+      }
+      #lightbox span {
+        position: absolute; top: 14px; right: 22px; color: #fff; font: 26px sans-serif;
+        cursor: pointer;
+      }
+      #dropveil {
+        position: fixed; inset: 0; z-index: 15; display: none;
+        border: 3px dashed #5d7ba8; background: #22304a33; pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hint">WASD: walk · shift: fast · right-drag: look · drop files onto walls · click: select · scroll: resize</div>
+    <div id="toast"></div>
+    <div id="addbar">
+      <button id="addFile">+ obraz / wideo</button>
+      <button id="addLink">+ link (YouTube/Vimeo)</button>
+    </div>
+    <div id="panel"></div>
+    <div id="lightbox"><span id="lightboxClose">✕</span></div>
+    <div id="dropveil"></div>
+    <script type="module" src="/src/room/main.ts"></script>
+  </body>
+</html>
