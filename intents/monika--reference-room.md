@@ -54,3 +54,6 @@ a line under it. No ceremony, nothing to break in the artwork.
   removed; Ctrl+Z restored item WITH caption; YouTube link card added.
   Test data cleaned; seed room.json empty. Visual pass on a real GPU
   browser still owed — Monika checks it in Chrome.
+- visual pass done: Monika opened the room in Chrome and pinned the
+  first real reference (image + caption) — first room content committed
+  on this branch alongside the feature.
