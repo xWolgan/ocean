@@ -14,7 +14,7 @@ export const ROOM_D = 8;
 /** room center on z: north wall inner face lands at z = 3.2, 0.2 m past
  *  the field volume (which ends at z = 3) */
 export const ROOM_CZ = 7.2;
-export const WALL_THICKNESS = 0.15;
+export const WALL_THICKNESS = 0.35;
 
 // the window: a rectangle crowned with a semicircle, wall-local meters
 // (slim and modest — Monika's second take after seeing the wide one)
