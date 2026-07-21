@@ -125,11 +125,11 @@ export function buildRoom(scene: THREE.Scene): Wall[] {
   const zN = ROOM_CZ - halfD; // north wall inner face
   const zS = ROOM_CZ + halfD;
 
-  const wallTex = gridTexture('#c3c6cd', '#b5b9c1');
+  const wallTex = gridTexture('#e4e6eb', '#d6d9df');
   wallTex.repeat.set(ROOM_W / 0.5, ROOM_H / 0.5);
   const wallMat = new THREE.MeshLambertMaterial({ map: wallTex });
   // the extruded wall's UVs are in shape units (meters), not 0..1
-  const winTex = gridTexture('#c3c6cd', '#b5b9c1');
+  const winTex = gridTexture('#e4e6eb', '#d6d9df');
   winTex.repeat.set(2, 2);
   const winMat = new THREE.MeshLambertMaterial({ map: winTex });
 
@@ -191,7 +191,7 @@ export function buildRoom(scene: THREE.Scene): Wall[] {
 
   const ceiling = new THREE.Mesh(
     new THREE.PlaneGeometry(ROOM_W, ROOM_D),
-    new THREE.MeshLambertMaterial({ color: 0xb8bcc4 }),
+    new THREE.MeshLambertMaterial({ color: 0xdadce2 }),
   );
   ceiling.rotation.x = Math.PI / 2;
   ceiling.position.set(0, ROOM_H, ROOM_CZ);

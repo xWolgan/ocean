@@ -73,3 +73,4 @@ a line under it. No ceremony, nothing to break in the artwork.
 - second color pass: walls doubled in lightness (#c3c6cd, ceiling to
   match), floor turned into a 3D-modeling-app grid — dark ground
   (#2b2e35), lines in the wall color, fine at 0.5 m, strong at 1 m.
+- third color pass: walls up again to near-white grey (#e4e6eb).
