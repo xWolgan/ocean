@@ -9,6 +9,7 @@ import { toast } from './ui';
 import { ModulationBus } from '../state/ModulationBus';
 import { ObjectManager } from '../objects/ObjectManager';
 import { ParticleField } from '../field/ParticleField';
+import { PaperPlanes } from './planes';
 
 /** Reference room — a dev-only shared moodboard (see intents/
  *  monika--reference-room.md). Runs on the artwork's renderer so the
@@ -41,6 +42,9 @@ const bus = new ModulationBus();
 const fieldObjects = new ObjectManager();
 const field = new ParticleField(1 << 16, fieldObjects.targetTexture, fieldObjects.imageTextures);
 scene.add(field.mesh);
+
+// one paper airplane a minute drifts in through the window
+const planes = new PaperPlanes(scene);
 
 // Alegreya (SIL OFL 1.1; subset files from Google Fonts, bundled so both
 // studios render identically, offline too) — the wall-writing typeface.
@@ -115,7 +119,7 @@ if (editMode) {
 }
 
 // dev hook for automated probes, mirroring the artwork's __ocean
-Object.assign(window, { __room: { data, views, camera, walls, editMode, editor, bus, field } });
+Object.assign(window, { __room: { data, views, camera, walls, editMode, editor, bus, field, planes } });
 
 // the same kind of clock the artwork uses: the field is a pure function
 // of time on this timeline
@@ -126,6 +130,7 @@ renderer.setAnimationLoop((now: number) => {
   last = now;
   const tSec = (performance.now() - epoch) / 1000;
   controller.update(dt);
+  planes.update(dt);
   bus.update();
   fieldObjects.update(dt);
   field.update(bus.out, tSec, dt);

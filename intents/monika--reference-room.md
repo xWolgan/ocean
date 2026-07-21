@@ -77,6 +77,14 @@ a line under it. No ceremony, nothing to break in the artwork.
 - fourth: pure white walls tried and rolled back — Monika keeps the
   near-white grey; what she wanted white was the WRITING. Note ink is
   white again (with a soft shadow so it holds on the light walls).
+- paper airplanes (Monika's idea): one folded dart a minute glides in
+  from the ocean through the window (cubic bezier funneled through the
+  arch, ease-out, paper wobble) and settles on a mound by the window;
+  at exactly 100 the pile vanishes and begins again. Ambient and local
+  (localStorage, not room.json — each studio has its own sky); arrivals
+  accrue at the same rate while the room is closed, so returning after
+  an hour finds ~60 planes. Probe: arrivals steady at 65 s across dt
+  sizes, pile peaked at exactly 100 children, cleared to 0, restarted.
 - typeface: wall notes and captions set in Alegreya (SIL OFL; latin +
   latin-ext woff2 subsets bundled in src/room/, loaded via FontFace
   before views build). Note ink flipped to dark graphite — chalk-white
