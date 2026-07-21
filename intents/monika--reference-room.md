@@ -68,3 +68,5 @@ a line under it. No ceremony, nothing to break in the artwork.
   'note' — writing on the walls (chalk-style transparent text, edited
   in the side panel, aspect follows the text). Probe: field mounted,
   extrude at z=3.2, note lifecycle green, existing content preserved.
+- Monika's tuning after seeing it: window slimmed to 1.1 m (sill 0.9,
+  apex 2.45), walls raised to 4 m and lightened again (#7e838d).

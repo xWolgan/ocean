@@ -9,7 +9,7 @@ import * as THREE from 'three/webgpu';
  *  system. */
 
 export const ROOM_W = 8;
-export const ROOM_H = 3;
+export const ROOM_H = 4;
 export const ROOM_D = 8;
 /** room center on z: north wall inner face lands at z = 3.2, 0.2 m past
  *  the field volume (which ends at z = 3) */
@@ -17,9 +17,10 @@ export const ROOM_CZ = 7.2;
 export const WALL_THICKNESS = 0.15;
 
 // the window: a rectangle crowned with a semicircle, wall-local meters
-const WIN_HALF_W = 0.9; // 1.8 m wide
-const WIN_SILL = 0.8; // bottom edge above the floor
-const WIN_RECT_TOP = 2.0; // where the arc takes over (apex at 2.9)
+// (slim and modest — Monika's second take after seeing the wide one)
+const WIN_HALF_W = 0.55; // 1.1 m wide
+const WIN_SILL = 0.9; // bottom edge above the floor
+const WIN_RECT_TOP = 1.9; // where the arc takes over (apex at 2.45)
 
 export interface Wall {
   index: 0 | 1 | 2 | 3;
@@ -96,11 +97,11 @@ export function buildRoom(scene: THREE.Scene): Wall[] {
   const zN = ROOM_CZ - halfD; // north wall inner face
   const zS = ROOM_CZ + halfD;
 
-  const wallTex = gridTexture('#666c77', '#727884');
+  const wallTex = gridTexture('#7e838d', '#888d97');
   wallTex.repeat.set(ROOM_W / 0.5, ROOM_H / 0.5);
   const wallMat = new THREE.MeshLambertMaterial({ map: wallTex });
   // the extruded wall's UVs are in shape units (meters), not 0..1
-  const winTex = gridTexture('#666c77', '#727884');
+  const winTex = gridTexture('#7e838d', '#888d97');
   winTex.repeat.set(2, 2);
   const winMat = new THREE.MeshLambertMaterial({ map: winTex });
 
@@ -162,7 +163,7 @@ export function buildRoom(scene: THREE.Scene): Wall[] {
 
   const ceiling = new THREE.Mesh(
     new THREE.PlaneGeometry(ROOM_W, ROOM_D),
-    new THREE.MeshLambertMaterial({ color: 0x5f6470 }),
+    new THREE.MeshLambertMaterial({ color: 0x787d87 }),
   );
   ceiling.rotation.x = Math.PI / 2;
   ceiling.position.set(0, ROOM_H, ROOM_CZ);
