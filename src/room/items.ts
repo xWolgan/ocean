@@ -66,7 +66,7 @@ function linkCardTexture(url: string): THREE.CanvasTexture {
       ctx.lineTo(w / 2 - 28, h / 2 + 38);
       ctx.closePath();
       ctx.fill();
-      ctx.font = '26px system-ui, sans-serif';
+      ctx.font = '26px Alegreya, serif';
       ctx.textAlign = 'center';
       ctx.fillText(host, w / 2, h - 46);
       ctx.fillStyle = '#8a94a6';
@@ -212,17 +212,16 @@ export class ItemView {
       const W = 640;
       const pad = 16;
       const probeCtx = document.createElement('canvas').getContext('2d')!;
-      probeCtx.font = '34px system-ui, sans-serif';
+      probeCtx.font = '34px Alegreya, serif';
       const lines = wrapLines(probeCtx, trimmed, W - pad * 2);
       const lineH = 44;
       const H = lines.length * lineH + pad * 2;
       const tex = canvasTexture(
         (ctx, w) => {
           ctx.clearRect(0, 0, w, H);
-          ctx.fillStyle = '#eef2f8';
-          ctx.shadowColor = '#00000088';
-          ctx.shadowBlur = 6;
-          ctx.font = '34px system-ui, sans-serif';
+          // dark graphite — pencil on plaster (the walls are near-white)
+          ctx.fillStyle = '#2f333b';
+          ctx.font = '34px Alegreya, serif';
           lines.forEach((l, i) => ctx.fillText(l, pad, pad + (i + 0.8) * lineH));
         },
         W,
@@ -249,7 +248,7 @@ export class ItemView {
     const W = 512;
     const pad = 10;
     const probeCtx = document.createElement('canvas').getContext('2d')!;
-    probeCtx.font = '26px system-ui, sans-serif';
+    probeCtx.font = '26px Alegreya, serif';
     const lines = wrapLines(probeCtx, trimmed, W - pad * 2);
     const lineH = 34;
     const H = lines.length * lineH + pad * 2;
@@ -258,7 +257,7 @@ export class ItemView {
         ctx.fillStyle = '#14161c';
         ctx.fillRect(0, 0, w, H);
         ctx.fillStyle = '#dbe2ee';
-        ctx.font = '26px system-ui, sans-serif';
+        ctx.font = '26px Alegreya, serif';
         lines.forEach((l, i) => ctx.fillText(l, pad, pad + (i + 0.8) * lineH));
       },
       W,

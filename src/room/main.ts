@@ -42,6 +42,25 @@ const fieldObjects = new ObjectManager();
 const field = new ParticleField(1 << 16, fieldObjects.targetTexture, fieldObjects.imageTextures);
 scene.add(field.mesh);
 
+// Alegreya (SIL OFL 1.1; subset files from Google Fonts, bundled so both
+// studios render identically, offline too) — the wall-writing typeface.
+// Loaded BEFORE the views are built so canvas text never falls back.
+try {
+  const faces = [
+    new FontFace('Alegreya', 'url(/src/room/alegreya-latin.woff2)', {
+      unicodeRange:
+        'U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD',
+    }),
+    new FontFace('Alegreya', 'url(/src/room/alegreya-latin-ext.woff2)', {
+      unicodeRange:
+        'U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF',
+    }),
+  ];
+  await Promise.all(faces.map((f) => f.load().then((l) => document.fonts.add(l))));
+} catch {
+  /* canvas falls back to serif — the room still works */
+}
+
 const data: RoomData = await loadRoom();
 const views = new Map<string, ItemView>();
 const aniso =
