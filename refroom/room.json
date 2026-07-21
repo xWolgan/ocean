@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "326a4c25-ce5b-4026-9b15-6291b10ab481",
+      "caption": "36degrees\n",
+      "kind": "image",
+      "src": "refroom/assets/image-1-.png",
+      "wall": 0,
+      "u": 0.1946844993141289,
+      "v": 0.5143284357853222,
+      "w": 2.9149519890260622,
+      "aspect": 1.25
+    },
+    {
+      "id": "8d601126-e130-41f3-932e-3b1f3650de04",
+      "caption": "aksonometria\n",
+      "kind": "image",
+      "src": "refroom/assets/e042c9e895876a648e8ab4c7adbbdcd4.jpg",
+      "wall": 3,
+      "u": 0.5428191034275902,
+      "v": 0.5337523914931294,
+      "w": 1.7008464882469587,
+      "aspect": 1.4125
+    },
+    {
+      "id": "7f31fd3b-90b6-4994-bee0-fbba937cbdbd",
+      "caption": "",
+      "kind": "image",
+      "src": "refroom/assets/ocean_2.png",
+      "wall": 1,
+      "u": 0.169637955069871,
+      "v": 0.664025751769332,
+      "w": 1,
+      "aspect": 0.6666666666666666
+    },
+    {
+      "id": "784258d0-434b-4102-8e79-eaee400c3cbb",
+      "caption": "SZUM:\nruch\n",
+      "kind": "note",
+      "src": "",
+      "wall": 0,
+      "u": 0.775,
+      "v": 0.877701131959031,
+      "w": 3.4,
+      "aspect": 0.1875
+    }
+  ]
+}

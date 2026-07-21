@@ -39,6 +39,19 @@ OCEAN runs entirely in your web browser. There is nothing to install.
      back and we can open exactly what you made. **load scene file**
      opens a scene someone sent you.
 
+5. **The reference room** (shared moodboard — works only from a studio
+   with the project, not on the public site): open
+   `http://localhost:5173/room.html`. A plain 3D room with four walls.
+   Drop images or short videos from your desktop onto a wall, or use the
+   buttons in the top-left corner (also for YouTube/Vimeo links). Click
+   a picture to select it — drag to move it (across walls too), scroll
+   to resize, type a caption in the side panel. Delete removes, Ctrl+Z
+   undoes. Everything saves itself; say "zapisz pokój" / "save the room"
+   to your Claude to share it with the other studio.
+   The arched window in the north wall looks out at the living ocean
+   itself (view-only), and "+ napis na ścianie" writes directly on the
+   walls.
+
 That's all. If something looks frozen, refresh the page — nothing can
 break, and your saved scene files are safe on your disk.
 
@@ -80,6 +93,19 @@ OCEAN działa w całości w przeglądarce. Niczego nie trzeba instalować.
    - `scene` → **save scene** zapisuje mały plik `.json` — odeślij go,
      a otworzymy dokładnie to, co stworzyłaś. **load scene file** otwiera
      scenę, którą ktoś Ci przysłał.
+
+5. **Pokoik referencyjny** (wspólna tablica inspiracji — działa tylko ze
+   studia z projektem, nie na publicznej stronie): otwórz
+   `http://localhost:5173/room.html`. Zwykły trójwymiarowy pokój z
+   czterema ścianami. Przeciągnij obrazy lub krótkie filmy z pulpitu na
+   ścianę, albo użyj przycisków w lewym górnym rogu (także dla linków
+   YouTube/Vimeo). Kliknij obraz, żeby go zaznaczyć — przeciągnij, by
+   przesunąć (również na inną ścianę), kółko myszy zmienia rozmiar,
+   podpis wpisuje się w panelu bocznym. Delete usuwa, Ctrl+Z cofa.
+   Wszystko zapisuje się samo; powiedz swojemu Claude'owi „zapisz
+   pokój", żeby podzielić się nim z drugim studiem.
+   Łukowe okno w północnej ścianie wychodzi na sam żywy ocean (tylko
+   widok), a „+ napis na ścianie" pisze bezpośrednio po ścianach.
 
 To wszystko. Jeśli coś się zawiesi — odśwież stronę. Nic nie można
 zepsuć, a zapisane pliki scen są bezpieczne na Twoim dysku.
