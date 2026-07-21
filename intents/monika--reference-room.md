@@ -70,3 +70,6 @@ a line under it. No ceremony, nothing to break in the artwork.
   extrude at z=3.2, note lifecycle green, existing content preserved.
 - Monika's tuning after seeing it: window slimmed to 1.1 m (sill 0.9,
   apex 2.45), walls raised to 4 m and lightened again (#7e838d).
+- second color pass: walls doubled in lightness (#c3c6cd, ceiling to
+  match), floor turned into a 3D-modeling-app grid — dark ground
+  (#2b2e35), lines in the wall color, fine at 0.5 m, strong at 1 m.

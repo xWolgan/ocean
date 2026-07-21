@@ -69,6 +69,34 @@ function gridTexture(base: string, line: string): THREE.CanvasTexture {
   return tex;
 }
 
+/** 3D-modeling-app floor: dark ground, grid lines in the wall color —
+ *  a fine line every 0.5 m, a stronger one every meter. One canvas
+ *  tile = 1 m, repeated. */
+function floorGridTexture(bg: string, minor: string, major: string): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 256;
+  const ctx = c.getContext('2d')!;
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, 256, 256);
+  ctx.strokeStyle = minor;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(128.5, 0);
+  ctx.lineTo(128.5, 256);
+  ctx.moveTo(0, 128.5);
+  ctx.lineTo(256, 128.5);
+  ctx.stroke();
+  ctx.strokeStyle = major;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, 254, 254);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 /** the north wall: a slab with the arched window punched through it —
  *  no frame, just the hole showing the wall's thickness */
 function windowWallGeometry(): THREE.ExtrudeGeometry {
@@ -97,11 +125,11 @@ export function buildRoom(scene: THREE.Scene): Wall[] {
   const zN = ROOM_CZ - halfD; // north wall inner face
   const zS = ROOM_CZ + halfD;
 
-  const wallTex = gridTexture('#7e838d', '#888d97');
+  const wallTex = gridTexture('#c3c6cd', '#b5b9c1');
   wallTex.repeat.set(ROOM_W / 0.5, ROOM_H / 0.5);
   const wallMat = new THREE.MeshLambertMaterial({ map: wallTex });
   // the extruded wall's UVs are in shape units (meters), not 0..1
-  const winTex = gridTexture('#7e838d', '#888d97');
+  const winTex = gridTexture('#c3c6cd', '#b5b9c1');
   winTex.repeat.set(2, 2);
   const winMat = new THREE.MeshLambertMaterial({ map: winTex });
 
@@ -151,8 +179,8 @@ export function buildRoom(scene: THREE.Scene): Wall[] {
     });
   }
 
-  const floorTex = gridTexture('#2c2f37', '#343842');
-  floorTex.repeat.set(ROOM_W / 0.5, ROOM_D / 0.5);
+  const floorTex = floorGridTexture('#2b2e35', '#9599a3', '#c3c6cd');
+  floorTex.repeat.set(ROOM_W, ROOM_D);
   const floor = new THREE.Mesh(
     new THREE.PlaneGeometry(ROOM_W, ROOM_D),
     new THREE.MeshLambertMaterial({ map: floorTex }),
@@ -163,7 +191,7 @@ export function buildRoom(scene: THREE.Scene): Wall[] {
 
   const ceiling = new THREE.Mesh(
     new THREE.PlaneGeometry(ROOM_W, ROOM_D),
-    new THREE.MeshLambertMaterial({ color: 0x787d87 }),
+    new THREE.MeshLambertMaterial({ color: 0xb8bcc4 }),
   );
   ceiling.rotation.x = Math.PI / 2;
   ceiling.position.set(0, ROOM_H, ROOM_CZ);
