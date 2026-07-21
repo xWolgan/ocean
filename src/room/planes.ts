@@ -12,8 +12,9 @@ const PERIOD_S = 60;
 const FIRST_ARRIVAL_S = 8; // don't make her wait a minute to see one
 const STORE_KEY = 'refroom.planes.v1';
 
-const PILE_CENTER_X = 1.15;
-const PILE_CENTER_Z_OFF = 0.5; // from the north wall, into the room
+const PILE_CENTER_X = 1.5;
+const PILE_CENTER_Z_OFF = 2.6; // from the north wall, into the room —
+// far enough that the indoor glide can breathe and look like flight
 const PILE_RADIUS = 0.38;
 
 /** a classic dart, folded from one white sheet (~34 cm long) */
@@ -149,7 +150,7 @@ export class PaperPlanes {
     this.flight = {
       mesh,
       t: 0,
-      dur: 2.6 + Math.random() * 1.2,
+      dur: 3.0 + Math.random() * 1.2,
       from: new THREE.Vector3(
         (Math.random() - 0.5) * 5,
         entryY - 0.25 + Math.random() * 0.5,
@@ -159,7 +160,7 @@ export class PaperPlanes {
       crest: new THREE.Vector3(
         -0.8 + Math.random() * 2.6,
         entryY + 1.1 + Math.random() * 0.8,
-        zN + 1.4 + Math.random() * 1.8,
+        zN + 1.0 + Math.random() * 1.2,
       ),
       rest: rest.pos,
       restQuat: rest.quat,

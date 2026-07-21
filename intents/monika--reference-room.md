@@ -94,6 +94,9 @@ a line under it. No ceremony, nothing to break in the artwork.
   opening; tempo and wobble differ per plane. Lesson recorded: with one
   cubic bezier the crest landed OUTSIDE the wall — the room only ever
   saw the descent.
+- pile moved deeper into the room (2.6 m off the window wall, x 1.5)
+  so the indoor glide lasts and reads as real flight; duration up a
+  notch (3.0-4.2 s), crest kept between window and pile.
 - typeface: wall notes and captions set in Alegreya (SIL OFL; latin +
   latin-ext woff2 subsets bundled in src/room/, loaded via FontFace
   before views build). Note ink flipped to dark graphite — chalk-white
