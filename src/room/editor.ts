@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { RoomData, RoomItem } from './store';
 import { scheduleSave, uploadAsset } from './store';
 import type { Wall } from './RoomScene';
@@ -71,6 +71,7 @@ export class RoomEditor {
     showAddBar(
       (files) => void this.importFiles(files, null),
       (url) => void this.addLink(url),
+      () => void this.addNote(),
     );
   }
 
@@ -324,6 +325,23 @@ export class RoomEditor {
     this.clampToWall(item, view);
     view.applyTransform(this.host.walls);
     scheduleSave(this.host.data);
+  }
+
+  async addNote(): Promise<void> {
+    const at = this.facingWall();
+    const item = this.newItem({
+      kind: 'note',
+      src: '',
+      wall: at.wall.index,
+      u: at.u,
+      v: at.v,
+      w: 1.4,
+      aspect: 0.1, // repainted from the real text by setCaption
+    });
+    item.caption = 'napisz coś…';
+    await this.place(item);
+    this.select(item.id);
+    toast('Napis na ścianie — edytuj tekst w panelu po prawej');
   }
 
   async addLink(url: string): Promise<void> {

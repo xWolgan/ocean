@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { buildRoom } from './RoomScene';
 import { RoomController } from './Controller';
 import { loadRoom, detectEditMode, flushSave, setSaveErrorHandler } from './store';
@@ -6,33 +6,49 @@ import type { RoomData, RoomItem } from './store';
 import { ItemView } from './items';
 import { RoomEditor } from './editor';
 import { toast } from './ui';
+import { ModulationBus } from '../state/ModulationBus';
+import { ObjectManager } from '../objects/ObjectManager';
+import { ParticleField } from '../field/ParticleField';
 
 /** Reference room — a dev-only shared moodboard (see intents/
- *  monika--reference-room.md). Plain WebGL on purpose: no TSL, no
- *  compute, nothing shared with the artwork's deterministic twins. */
+ *  monika--reference-room.md). Runs on the artwork's renderer so the
+ *  arched window in the north wall looks out at the REAL substance:
+ *  the same deterministic particle field, mounted read-only beyond the
+ *  wall. Strictly one-way — the artwork knows nothing about the room. */
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGPURenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
+await renderer.init();
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x101014);
+// the artwork's void: what you see through the window past the particles
+scene.background = new THREE.Color(0x000004);
 const camera = new THREE.PerspectiveCamera(
   65,
   window.innerWidth / window.innerHeight,
   0.05,
-  50,
+  100,
 );
 
 const walls = buildRoom(scene);
 const controller = new RoomController(camera, renderer.domElement);
 
+// the ocean outside: a private, view-only instance of the substance
+// (65k particles — a window view, not the full composition)
+const bus = new ModulationBus();
+const fieldObjects = new ObjectManager();
+const field = new ParticleField(1 << 16, fieldObjects.targetTexture, fieldObjects.imageTextures);
+scene.add(field.mesh);
+
 const data: RoomData = await loadRoom();
 const views = new Map<string, ItemView>();
+const aniso =
+  (renderer as unknown as { capabilities?: { getMaxAnisotropy?: () => number } }).capabilities?.getMaxAnisotropy?.() ?? 4;
 
 async function spawnView(item: RoomItem): Promise<ItemView> {
-  const view = await ItemView.create(item, renderer, (aspect) => {
+  const view = await ItemView.create(item, aniso, (aspect) => {
     item.aspect = aspect;
     view.applyTransform(walls);
   });
@@ -80,13 +96,21 @@ if (editMode) {
 }
 
 // dev hook for automated probes, mirroring the artwork's __ocean
-Object.assign(window, { __room: { data, views, camera, walls, editMode, editor } });
+Object.assign(window, { __room: { data, views, camera, walls, editMode, editor, bus, field } });
 
+// the same kind of clock the artwork uses: the field is a pure function
+// of time on this timeline
+const epoch = performance.now();
 let last = performance.now();
 renderer.setAnimationLoop((now: number) => {
   const dt = Math.min((now - last) / 1000, 1 / 20);
   last = now;
+  const tSec = (performance.now() - epoch) / 1000;
   controller.update(dt);
+  bus.update();
+  fieldObjects.update(dt);
+  field.update(bus.out, tSec, dt);
+  field.updateObjects(fieldObjects, bus.out.scale);
   renderer.render(scene, camera);
 });
 

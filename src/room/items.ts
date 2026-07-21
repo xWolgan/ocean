@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { RoomItem } from './store';
 import type { Wall } from './RoomScene';
 import { wallPoint } from './RoomScene';
@@ -124,12 +124,11 @@ export class ItemView {
   /** aspect discovered at load differs from stored → caller re-saves */
   static async create(
     item: RoomItem,
-    renderer: THREE.WebGLRenderer,
+    aniso: number,
     onAspect: (aspect: number) => void,
   ): Promise<ItemView> {
     const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
     const view = new ItemView(item, mat);
-    const aniso = renderer.capabilities.getMaxAnisotropy();
 
     const applyTex = (tex: THREE.Texture) => {
       if (view.disposed) {
@@ -172,6 +171,8 @@ export class ItemView {
       void video.play().catch(() => {});
       view.video = video;
       applyTex(new THREE.VideoTexture(video));
+    } else if (item.kind === 'note') {
+      // texture already painted by setCaption in the constructor
     } else {
       // link: try a YouTube thumbnail, else a generated card
       const yt = youTubeId(item.src);
@@ -204,6 +205,37 @@ export class ItemView {
   }
 
   setCaption(text: string): void {
+    // a note IS its text: the caption paints the main plane (chalk on
+    // the wall — transparent background), never a separate label below
+    if (this.item.kind === 'note') {
+      const trimmed = text.trim() || '…';
+      const W = 640;
+      const pad = 16;
+      const probeCtx = document.createElement('canvas').getContext('2d')!;
+      probeCtx.font = '34px system-ui, sans-serif';
+      const lines = wrapLines(probeCtx, trimmed, W - pad * 2);
+      const lineH = 44;
+      const H = lines.length * lineH + pad * 2;
+      const tex = canvasTexture(
+        (ctx, w) => {
+          ctx.clearRect(0, 0, w, H);
+          ctx.fillStyle = '#eef2f8';
+          ctx.shadowColor = '#00000088';
+          ctx.shadowBlur = 6;
+          ctx.font = '34px system-ui, sans-serif';
+          lines.forEach((l, i) => ctx.fillText(l, pad, pad + (i + 0.8) * lineH));
+        },
+        W,
+        H,
+      );
+      const mat = this.plane.material as THREE.MeshBasicMaterial;
+      mat.map?.dispose();
+      mat.map = tex;
+      mat.transparent = true;
+      mat.needsUpdate = true;
+      this.item.aspect = H / W;
+      return;
+    }
     if (this.captionMesh) {
       (this.captionMesh.material as THREE.MeshBasicMaterial).map?.dispose();
       (this.captionMesh.material as THREE.MeshBasicMaterial).dispose();

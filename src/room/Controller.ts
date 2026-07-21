@@ -1,5 +1,5 @@
-import * as THREE from 'three';
-import { ROOM_W, ROOM_D } from './RoomScene';
+import * as THREE from 'three/webgpu';
+import { ROOM_W, ROOM_D, ROOM_CZ } from './RoomScene';
 
 const EYE_HEIGHT = 1.6;
 const MARGIN = 0.4; // keep the camera off the walls
@@ -27,7 +27,7 @@ export class RoomController {
 
   constructor(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
     this.camera = camera;
-    camera.position.set(0, EYE_HEIGHT, 2.5);
+    camera.position.set(0, EYE_HEIGHT, ROOM_CZ + 1.5);
 
     window.addEventListener('keydown', (e) => {
       const t = e.target as HTMLElement | null;
@@ -86,7 +86,7 @@ export class RoomController {
     this.move.normalize().multiplyScalar(speed * dt);
     const p = this.camera.position.add(this.move);
     p.x = Math.max(-(ROOM_W / 2 - MARGIN), Math.min(ROOM_W / 2 - MARGIN, p.x));
-    p.z = Math.max(-(ROOM_D / 2 - MARGIN), Math.min(ROOM_D / 2 - MARGIN, p.z));
+    p.z = Math.max(ROOM_CZ - (ROOM_D / 2 - MARGIN), Math.min(ROOM_CZ + (ROOM_D / 2 - MARGIN), p.z));
     p.y = EYE_HEIGHT;
   }
 }

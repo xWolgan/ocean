@@ -7,12 +7,13 @@
  *  static host) the room opens read-only.
  */
 
-export type Kind = 'image' | 'video' | 'link';
+export type Kind = 'image' | 'video' | 'link' | 'note';
 
 export interface RoomItem {
   id: string;
   kind: Kind;
-  /** 'refroom/assets/…' for files; the full URL for kind 'link' */
+  /** 'refroom/assets/…' for files; the full URL for kind 'link';
+   *  empty for kind 'note' (the text lives in `caption`) */
   src: string;
   wall: 0 | 1 | 2 | 3;
   /** item CENTER on the wall, 0..1 left→right facing it */

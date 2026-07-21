@@ -22,6 +22,17 @@
       "v": 0.73125,
       "w": 1,
       "aspect": 1.4125
+    },
+    {
+      "id": "7f31fd3b-90b6-4994-bee0-fbba937cbdbd",
+      "caption": "",
+      "kind": "image",
+      "src": "refroom/assets/ocean_2.png",
+      "wall": 0,
+      "u": 0.7188252107304977,
+      "v": 0.6348534253292148,
+      "w": 1,
+      "aspect": 0.6666666666666666
     }
   ]
 }

@@ -76,16 +76,24 @@ export function openPanel(item: RoomItem, hooks: PanelHooks): void {
 
   const title = document.createElement('h2');
   title.textContent =
-    item.kind === 'image' ? 'Obraz' : item.kind === 'video' ? 'Wideo (plik)' : 'Wideo (link)';
+    item.kind === 'image'
+      ? 'Obraz'
+      : item.kind === 'video'
+        ? 'Wideo (plik)'
+        : item.kind === 'link'
+          ? 'Wideo (link)'
+          : 'Napis na ścianie';
   panel.appendChild(title);
 
-  const src = document.createElement('div');
-  src.style.cssText = 'font:11px monospace;color:#6d7688;word-break:break-all;';
-  src.textContent = item.src;
-  panel.appendChild(src);
+  if (item.src) {
+    const src = document.createElement('div');
+    src.style.cssText = 'font:11px monospace;color:#6d7688;word-break:break-all;';
+    src.textContent = item.src;
+    panel.appendChild(src);
+  }
 
   const capLabel = document.createElement('label');
-  capLabel.textContent = 'Podpis';
+  capLabel.textContent = item.kind === 'note' ? 'Tekst' : 'Podpis';
   panel.appendChild(capLabel);
   const cap = document.createElement('textarea');
   cap.value = item.caption;
@@ -133,9 +141,14 @@ export function openPanel(item: RoomItem, hooks: PanelHooks): void {
 
 // --- add bar ----------------------------------------------------------
 
-export function showAddBar(onFile: (files: FileList) => void, onLink: (url: string) => void): void {
+export function showAddBar(
+  onFile: (files: FileList) => void,
+  onLink: (url: string) => void,
+  onNote: () => void,
+): void {
   const bar = document.getElementById('addbar')!;
   bar.style.display = 'flex';
+  document.getElementById('addNote')!.addEventListener('click', onNote);
   document.getElementById('addFile')!.addEventListener('click', () => {
     const input = document.createElement('input');
     input.type = 'file';

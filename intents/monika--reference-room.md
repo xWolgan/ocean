@@ -57,3 +57,14 @@ a line under it. No ceremony, nothing to break in the artwork.
 - visual pass done: Monika opened the room in Chrome and pinned the
   first real reference (image + caption) — first room content committed
   on this branch alongside the feature.
+- the window on the ocean (Monika's ask): the room moved onto the
+  artwork's renderer (three/webgpu) and shifted to z=7.2 so the field's
+  baked 6×3×6 volume lies just past the north wall; that wall became a
+  15 cm slab (ExtrudeGeometry) with a frameless arched opening (1.8 m
+  wide, sill 0.8, apex 2.9) — the hole shows the wall's thickness, and
+  through it the REAL substance (private 65k-particle view-only
+  instance, default patch). Strictly one-way: the artwork is untouched
+  and never sees the room. Also: walls lightened, and a new item kind
+  'note' — writing on the walls (chalk-style transparent text, edited
+  in the side panel, aspect follows the text). Probe: field mounted,
+  extrude at z=3.2, note lifecycle green, existing content preserved.
