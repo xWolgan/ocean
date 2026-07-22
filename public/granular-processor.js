@@ -1514,6 +1514,15 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const sqrtW = Math.sqrt(W);
     const wFreeHero = sqrtW * p.fieldGain;
     const gStep = 1 / (0.08 * sampleRate); // 80ms linear hero fade ramp
+    // TRANSPORT: heroes get ears too — per-ear arrival cursor tE = t − dE,
+    // 1/max(rE,NEAR_CLAMP), carrier re-anchored at anchorE = anchor + dE,
+    // the SAME per-grain machinery the bed uses (freezeRadii) so a promoted
+    // voice is bit-for-bit the signal the bed was drawing, keeping the
+    // heroGain/(1−heroGain) crossfade coherent. OFF is the single-cursor
+    // Stage-1 path, verbatim (branch below).
+    const transport = !!p.transport;
+    const invNear = 1 / NEAR_CLAMP; // max amplitude factor (1/max(rE,·) ≤ this)
+    const earScratch = this.bedREar; // freezeRadii out [rL,rR]; fillBed is done for this quantum
 
     const anyObjects = p.objects.some((o) => o && o.level > 0.001);
     for (let k = 0; k < POOL; k++) {
@@ -1568,7 +1577,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // (sync=1); using that upper bound here (rather than the exact
       // per-object wCap) means this pre-check can only under-skip, never
       // wrongly skip an audible voice.
-      if (v.amp * wFreeHero <= 0.0002 && (!anyObjects || v.capAmp * p.objectGain * W <= 0.0002)
+      // transport bounds amplitude by the emission loudness (amp0, no
+      // spatialize magnitude) times the largest possible 1/max(rE,·) = invNear,
+      // so the skip can only UNDER-skip, never silence an audible near voice.
+      const quietFree = transport ? v.amp0 * wFreeHero * invNear : v.amp * wFreeHero;
+      const quietCap = transport ? v.capAmp0 * p.objectGain * W * invNear : v.capAmp * p.objectGain * W;
+      if (quietFree <= 0.0002 && (!anyObjects || quietCap <= 0.0002)
         && this.heroGain[k] <= 0.001 && this.heroTarget[k] === 0) {
         const tEnd = t0 + n * dt;
         const nextF = (v.gen + 1 - v.phi) / invLFree;
@@ -1580,6 +1594,124 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           // block (2.7ms) re-evaluates
           continue;
         }
+      }
+
+      if (transport) {
+        // Per-ear cursors. The generation machinery stays on the EMISSION
+        // clock t (dE only shifts the read-out), so dE/rE/anchor are frozen
+        // per generation and recomputed on generation change alone — never
+        // per sample. rE comes from the SAME freezeRadii ring the bed reads
+        // (identical positions, identical tag), so the hero's rL/rR are the
+        // bed's rL/rR to the bit; the two renderings of one voice are one
+        // signal and the crossfade cannot comb. anchorE = anchor + dE is
+        // factored as "closed form at anchor, evaluated at tE" — the per-ear
+        // re-anchor (incl. at promotion) is then automatic, no stored phase
+        // accumulator to go stale (this is the cleanest allocation-free
+        // structure: a second cursor would only be redundant state able to
+        // drift from the first).
+        const rr2 = earScratch;
+        this.freezeRadii(k, v.gen, v.gen * 16 + 1, v.fx, v.fy, v.fz, rr2);
+        let fdL = rr2[0] / SPEED_OF_SOUND, fdR = rr2[1] / SPEED_OF_SOUND;
+        let fiL = 1 / Math.max(rr2[0], NEAR_CLAMP), fiR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+        let faF = Math.ceil(((v.gen - v.phi) / invLFree) * sampleRate) / sampleRate;
+        let cdL = 0, cdR = 0, ciL = 0, ciR = 0, caO = 0;
+        if (v.capOn) {
+          this.freezeRadii(k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
+          cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
+          ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+          caO = Math.ceil(((v.asgGen - v.asgPhi) / v.asgInvTau) * sampleRate) / sampleRate;
+        }
+        for (let s = 0; s < n; s++) {
+          const xF = t * invLFree + v.phi;
+          const gFn = Math.floor(xF);
+          if (gFn !== v.gen) {
+            this.refreshFreeGeneration(v, gFn, spat, v);
+            if (anyObjects) this.evaluateCapture(v, t, spat, v);
+            this.freezeRadii(k, gFn, gFn * 16 + 1, v.fx, v.fy, v.fz, rr2);
+            fdL = rr2[0] / SPEED_OF_SOUND; fdR = rr2[1] / SPEED_OF_SOUND;
+            fiL = 1 / Math.max(rr2[0], NEAR_CLAMP); fiR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+            faF = Math.ceil(((gFn - v.phi) / invLFree) * sampleRate) / sampleRate;
+            if (v.capOn) {
+              this.freezeRadii(k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
+              cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
+              ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+              caO = Math.ceil(((v.asgGen - v.asgPhi) / v.asgInvTau) * sampleRate) / sampleRate;
+            }
+          }
+          let captured = v.capOn;
+          if (captured) {
+            const xO = t * v.asgInvTau + v.asgPhi;
+            if (Math.floor(xO) !== v.asgGen) {
+              this.evaluateCapture(v, t, spat, v);
+              captured = v.capOn;
+              if (captured) {
+                this.freezeRadii(k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
+                cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
+                ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+                caO = Math.ceil(((v.asgGen - v.asgPhi) / v.asgInvTau) * sampleRate) / sampleRate;
+              }
+            }
+          }
+          // emission loudness (amp0/capAmp0 carry bassBoost, NOT the
+          // spatialize magnitude — 1/max(rE,·) replaces it per ear) times
+          // the bed's exact particle weight, so hero and bed agree
+          let emitAmp, dL, dR, iL, iR, anch, freq, sat, tf, tAarr, tBarr, lutC;
+          if (captured) {
+            const o = p.objects[v.asg];
+            const wCap = (sqrtW + (W - sqrtW) * o.sync) * p.objectGain;
+            emitAmp = v.capAmp0 * wCap;
+            dL = cdL; dR = cdR; iL = ciL; iR = ciR; anch = caO; freq = v.capFreq;
+            sat = v.capSat; tf = v.capTableFrac;
+            tAarr = this.wheel[v.capTableA]; tBarr = this.wheel[v.capTableB];
+            lutC = objEnvLUT[v.asg] || envLUT;
+          } else {
+            emitAmp = v.amp0 * wFreeHero;
+            dL = fdL; dR = fdR; iL = fiL; iR = fiR; anch = faF; freq = v.freeFreq;
+            sat = v.freeSat; tf = v.freeTableFrac;
+            tAarr = this.wheel[v.freeTableA]; tBarr = this.wheel[v.freeTableB];
+            lutC = envLUT;
+          }
+          if (emitAmp > 0.0002) {
+            const hg = this.heroGain[k];
+            // ear L: envelope age from tL = t − dL (aa<0 → not yet arrived,
+            // silent, natural), carrier at tL against the shared anchor
+            const tL = t - dL;
+            const aaL = captured
+              ? (tL * v.asgInvTau + v.asgPhi - v.asgGen) / 0.6
+              : (tL * invLFree + v.phi - v.gen - v.offN) / v.durN;
+            if (aaL > 0 && aaL < 1) {
+              const env = lutC.lut[(aaL * ENV_LUT_SIZE) | 0];
+              if (env > 0.0001) {
+                let ph = ((tL - anch) * freq) % 1;
+                if (ph < 0) ph += 1;
+                const idx = (ph * TABLE_SIZE) & TABLE_MASK;
+                const osc = sine[idx] * (1 - sat) + (tAarr[idx] * (1 - tf) + tBarr[idx] * tf) * sat;
+                outL[s] += osc * env * emitAmp * iL * hg;
+              }
+            }
+            // ear R
+            const tR = t - dR;
+            const aaR = captured
+              ? (tR * v.asgInvTau + v.asgPhi - v.asgGen) / 0.6
+              : (tR * invLFree + v.phi - v.gen - v.offN) / v.durN;
+            if (aaR > 0 && aaR < 1) {
+              const env = lutC.lut[(aaR * ENV_LUT_SIZE) | 0];
+              if (env > 0.0001) {
+                let ph = ((tR - anch) * freq) % 1;
+                if (ph < 0) ph += 1;
+                const idx = (ph * TABLE_SIZE) & TABLE_MASK;
+                const osc = sine[idx] * (1 - sat) + (tAarr[idx] * (1 - tf) + tBarr[idx] * tf) * sat;
+                outR[s] += osc * env * emitAmp * iR * hg;
+              }
+            }
+          }
+          const hg0 = this.heroGain[k];
+          this.heroGain[k] = hg0 < gTarget
+            ? Math.min(gTarget, hg0 + gStep)
+            : Math.max(gTarget, hg0 - gStep);
+          t += dt;
+        }
+        continue;
       }
 
       for (let s = 0; s < n; s++) {

@@ -185,11 +185,12 @@ test('tau floor: an object below the GPU clamp (0.0005s) stays finite and audibl
 
 test('heroes render and the bed does not double them', async () => {
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
-  // transport: 0 — hero/bed loudness parity is an off-path property
-  // until Task 3 gives heroes ears: since Task 2 the bed renders
-  // 1/max(rE,NEAR_CLAMP) per ear while heroes still spatialize(), so a
-  // transport-ON promotion legitimately changes a voice's loudness.
-  const params = { ...BASE_PARAMS, particleCount: 256, transport: 0 };
+  // Task 3 un-pins this to transport ON (the default): now that heroes
+  // render per ear with 1/max(rE,NEAR_CLAMP) and their own arrival, a
+  // promoted voice sounds the same in the hero loop as it did in the bed,
+  // so the handoff conserves energy in transport mode too (measured
+  // +0.009 dB, far inside the ±2 dB gate).
+  const params = { ...BASE_PARAMS, particleCount: 256 };
   globalThis.currentTime = 0;
   const with32 = render(new Engine(), 3.0, { ...params, heroCount: 32 }).L.slice(48000);
   globalThis.currentTime = 0;
@@ -259,10 +260,12 @@ test('bed/hero crossfade is complementary: no energy dug out at moderate weight'
   // through the limiter, above any click threshold that would bind.
   // Energy conservation is the property the crossfade actually owns.
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
-  // transport: 0 — same reason as the heroes-no-double test: hero/bed
-  // parity in transport mode returns with Task 3 (hero per-ear cursors);
-  // this ±0.4 dB guard owns the OFF-path crossfade machinery.
-  const params = { ...BASE_PARAMS, particleCount: 4096, transport: 0 };
+  // Task 3 un-pins this to transport ON (the default): with heroes now
+  // rendering their own per-ear arrival, the linear complement holds in
+  // transport mode too — the tight ±0.4 dB guard (vs the W=1 test's
+  // ±2 dB) still binds and measures +0.009 dB. The OFF path stays covered
+  // by the bit-sacred null test.
+  const params = { ...BASE_PARAMS, particleCount: 4096 };
   globalThis.currentTime = 0;
   const with32 = render(new Engine(), 3.0, { ...params, heroCount: 32 }).L.slice(48000);
   globalThis.currentTime = 0;
@@ -331,6 +334,41 @@ test('ITD: a lateral source leads in the near ear by the geometry', async () => 
   assert.ok(Math.abs(Math.abs(lag) - expected) <= 5, `ITD lag ${lag}, expected |lag|≈${expected}`);
 });
 
+test('heroes arrive when the bed arrives: crossfade stays coherent under transport', async () => {
+  // Task 3 gate: a voice rendered as a per-sample hero must land at the
+  // SAME per-ear arrival as the bed's splat of that voice, or the
+  // heroGain/(1−heroGain) crossfade sums two misaligned copies of the
+  // burst and combs. With GAP_OBJ (sync 1, radius 0) every captured voice
+  // is the identical delayed tone, so bedOnly (all voices in the bed) and
+  // mixed (32 promoted to per-ear heroes) must be the SAME signal to the
+  // sample. Pre-Task-3 the heroes were instantaneous (t, not t−dE), so
+  // the hero share arrived ~420 samples early and the mix decohered.
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  const base = { ...BASE_PARAMS, particleCount: 256, transport: 1, objects: [GAP_OBJ] };
+  globalThis.currentTime = 0;
+  const bedOnly = render(new Engine(), 3.0, { ...base, heroCount: 0 }).L.slice(48000);
+  globalThis.currentTime = 0;
+  const mixed = render(new Engine(), 3.0, { ...base, heroCount: 32 }).L.slice(48000);
+  const { lag } = xcorrPeak(bedOnly, mixed, 64);
+  assert.ok(Math.abs(lag) <= 4, `hero/bed misalignment ${lag} samples`);
+  // and energy conservation must survive transport (same ±2 dB gate as
+  // the stage-1 handoff test): heroes replace the bed's share, not add to
+  // it, even with each ear now carrying its own delayed 1/r copy.
+  const rms = (b) => Math.sqrt(b.reduce((a, x) => a + x * x, 0) / b.length);
+  const db = 20 * Math.log10(rms(mixed) / rms(bedOnly));
+  assert.ok(Math.abs(db) < 2, `hero handoff level shift ${db.toFixed(2)} dB`);
+  // The sharp guard: at heroCount 32 the bed still carries 7/8 of the
+  // voices, so gross lag and energy barely move even when the hero share
+  // arrives at the wrong time — the residual (mixed − bedOnly)² is what
+  // the crossfade actually owns (the hero share at its arrival minus the
+  // bed share it replaced). Instantaneous heroes measured 0.0078 here;
+  // per-ear cursors 0.0019. (Renders are fully deterministic — the margin
+  // is safe.)
+  let eD = 0, eA = 0;
+  for (let i = 0; i < bedOnly.length; i++) { const d = mixed[i] - bedOnly[i]; eD += d * d; eA += bedOnly[i] * bedOnly[i]; }
+  assert.ok(eD / eA < 0.006, `hero/bed decohered: residual ${(eD / eA).toFixed(4)}`);
+});
+
 function xcorrPeak(a, b, maxLag) {
   // normalized cross-correlation peak of a vs b over lags -maxLag..maxLag
   let ea = 0, eb = 0;
@@ -388,10 +426,12 @@ test('live ordering: bed and heroes share one clock after a late, large timeOffs
       proc.process([], [[new Float32Array(128), new Float32Array(128)]]);
       globalThis.currentTime += 128 / 48000;
     }
-    // transport: 0 — this test asserts sample-level alignment against
-    // the LEGACY engine (|lag| ≤ 16) and hero/bed coherence; transport
-    // ON delays the bed by r/343 (~600 samples here) by design, and
-    // heroes get their matching ears only in Task 3.
+    // transport: 0 — assertion (1) compares against the LEGACY engine,
+    // which has no transport at all; transport ON delays the bed by r/343
+    // (~600 samples here) by design, so this clock-sharing test is
+    // inherently off-path. Its transport-ON counterpart (hero/bed
+    // coherence under the same late-resync churn) is the next test, which
+    // Task 3 made pass by giving heroes their own per-ear arrival.
     return render(proc, 3.0, {
       ...BASE_PARAMS, objects: [obj], particleCount: 256, heroCount, timeOffset: 3.713,
       transport: 0,
@@ -426,6 +466,50 @@ test('live ordering: bed and heroes share one clock after a late, large timeOffs
   }
   const resid = eD / (eA || 1);
   assert.ok(resid < 0.008, `bed/hero handoff leaks: residual ${resid.toFixed(4)}`);
+});
+
+test('live ordering under transport: heroes stay coherent with the bed through resync + churn', async () => {
+  // The transport-ON counterpart of the live-ordering test above. Same
+  // live setup (20 warm-up quanta before a late 3.713 s timeOffset, a
+  // claim-0.7 synced object whose per-cycle capture lottery keeps the
+  // hero set churning), but with transport ON the assertion is hero↔bed
+  // coherence, not legacy alignment: a voice promoted to a per-ear hero
+  // mid-churn must land at the SAME arrival the bed was drawing, or the
+  // crossfade combs at every capture flip. Pre-Task-3 the heroes were
+  // instantaneous (spatialize(), no r/343), so this decohered; per-ear
+  // cursors bring it to lag −1, corr 0.999, residual 0.0021.
+  const obj = {
+    level: 1, claim: 0.7, tau: 0.02, sync: 1, scaleBlend: 0.4, pitchMul: 1,
+    centerX: 0, centerY: 1.7, centerZ: 0, reach: 10, gain: 1,
+    tintR: 0.8, tintG: 0.2, tintB: 0.2, tintW: 1, imgW: 0,
+    kind: 3, pa: 0.5, pb: 0, pc: 0,
+    crV: 0, crW: 1, srV: 0, srW: 1,
+    smearV: 0.5, smearW: 0, asymV: 0, asymW: 0,
+  };
+  const liveRender = (Engine, heroCount) => {
+    globalThis.currentTime = 0;
+    const proc = new Engine();
+    for (let q = 0; q < 20; q++) {
+      proc.process([], [[new Float32Array(128), new Float32Array(128)]]);
+      globalThis.currentTime += 128 / 48000;
+    }
+    return render(proc, 3.0, {
+      ...BASE_PARAMS, objects: [obj], particleCount: 256, heroCount, timeOffset: 3.713,
+      transport: 1,
+    }).L.slice(-48000);
+  };
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  const A = liveRender(Engine, 0); // pure bed (delayed r/343)
+  const B = liveRender(Engine, 32); // hero + bed mix, same ordering
+  // heroes and bed are the same delayed signal: the mix stays aligned and
+  // coherent with the pure bed even as the hero set churns on every cycle.
+  const ab = xcorrPeak(A, B, 512);
+  assert.ok(Math.abs(ab.lag) <= 16 && ab.corr > 0.9,
+    `hero mix decoheres from bed under transport: peak ${ab.corr.toFixed(3)} at lag ${ab.lag}`);
+  // what heroes add is what the bed removed — residual of (B − A) tiny
+  let eD = 0, eA = 0;
+  for (let i = 0; i < A.length; i++) { const d = B[i] - A[i]; eD += d * d; eA += A[i] * A[i]; }
+  assert.ok(eD / (eA || 1) < 0.008, `bed/hero handoff leaks under transport: residual ${(eD / (eA || 1)).toFixed(4)}`);
 });
 
 test('throughput: worklet renders faster than 4x realtime under load', async () => {

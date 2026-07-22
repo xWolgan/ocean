@@ -75,3 +75,28 @@ where.
   `transport: 0` (it guards the off path). Hero/bed loudness parity
   tests also pin off-mode until Task 3 gives heroes ears. Throughput
   5.0× realtime at 524k, transport ON (was 5.7× as a no-op).
+- Task 3 landed — heroes learn the flight time. In transport mode each
+  hero voice now renders PER EAR: cursor `tE = t − dE` (dE = rE/c frozen
+  per (voice, generation, ear) read from the SAME `freezeRadii` ring the
+  bed uses, so a promoted voice is bit-for-bit the signal the bed was
+  drawing), envelope age from tE (aa<0 = not yet arrived → silent),
+  amplitude emissionAmp·1/max(rE,NEAR_CLAMP)·heroGain with no pan/bassMono
+  (each ear the full pressure), carrier evaluated at tE against the shared
+  slot/cycle anchor (anchorE = anchor + dE, factored as closed-form-at-
+  anchor read at tE — so the per-ear re-anchor, incl. at promotion, is
+  automatic with no stored accumulator to go stale; zero new allocation).
+  The generation machinery stays on the emission clock; dE/rE/anchor
+  recompute on generation change only, never per sample. Transport-off is
+  the verbatim single-cursor path (a `continue` skips the untouched loop)
+  — re-verified bit-identical to the pre-Task-3 engine over a 3 s
+  heroes+captured+free stereo render. New gate: bed-only vs mixed under
+  transport stays coherent (lag 0, +0.15 dB, residual 0.0019 vs 0.0078
+  when heroes were instantaneous — the residual assertion is the fail-
+  first teeth). The three Task-2-parked tests un-pinned: heroes-no-double
+  (+0.009 dB) and crossfade-complementary (+0.009 dB, tight ±0.4 dB)
+  restored to transport ON; live-ordering keeps its off-path legacy-
+  alignment assertion and gains a transport-ON twin asserting hero/bed
+  coherence through resync + capture churn (lag −1, corr 0.999, residual
+  0.0021). Suite 20 tests green. Throughput at 524k/48/tau0.004: per-ear
+  heroes cost ~5% vs single-cursor (heroes are a small fraction of the
+  mass), well above the 5.0× floor for Tasks 6/7.
