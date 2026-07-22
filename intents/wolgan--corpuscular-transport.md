@@ -217,3 +217,59 @@ where.
   or above Nyquist, an extremely mild fraction-of-a-dB tilt (that
   mildness is the point). Suite 24/24 green; tsc + legacy check clean;
   throughput ~4.5× realtime.
+- Task 5 landed — motion bends pitch, from the delay itself. `freezeRadii`
+  now freezes `rdotL`/`rdotR` (range rate `dr/dt = −dot(unit(grainPos −
+  earE), listenerVel)`) alongside `rL`/`rR`, same ring, same tag, same
+  freeze instant — a grain's received pitch can no longer bend mid-flight
+  any more than its delay can. Bed: `splatBurstArrival` takes a new
+  `dopplerMul = 1 − rdot/c` parameter and multiplies it into the carrier
+  used for the splat's bin AND phase (fundamental and EACH partial, at
+  their own true frequency for absorption but the SAME Doppler multiplier
+  for placement) — derivation comment added: linearizing the retarded
+  delay around the freeze instant gives `y_ear(t) ≈ sin(2π·f(1−rdot/c)·
+  (t−anchor−dE))`, i.e. the static closed form with the carrier replaced
+  by `fE = f·(1−rdot/c)` wherever it drives phase; `anchorE`/`dE` and the
+  envelope's retarded clock stay UNCHANGED (Doppler bends pitch, not
+  arrival timing) — the same order of approximation the frozen-rE
+  contract already makes (honest for grains ≤100 ms at listener speeds
+  ≤20 m/s, ~0.6% worst-case intra-grain error, per the plan's bound).
+  Heroes: Task 3's closed-form per-ear phase made this a pure carrier
+  substitution too — `ph = ((tL − anch) * freq * emL) % 1` (and the R-ear
+  twin), with `emL`/`emR` the frozen `1 − rdot/c` read from the SAME
+  `freezeRadii` calls that already supply `dL`/`dR`/`iL`/`iR`, recomputed
+  only on generation change (never per sample); envelope age still comes
+  from the unshifted `tL = t − dL`. Air absorption is deliberately left on
+  the TRUE (unshifted) frequency in both renderers — physically the wave
+  travels the medium at its emitted frequency; the shift is a
+  receiver-side artifact of relative motion, not a change in what
+  interacts with the air. `tests/harness.mjs`'s `render()` gained an
+  optional 4th arg `onQuantum(q)`: a per-quantum params patch (used to
+  move the listener frame-by-frame), backward compatible (no 3rd/4th arg
+  = unchanged behavior).
+  Test-design finding (documented in the test): the brief's own sketch
+  (GAP_OBJ at r=3.0m, v=10 m/s, 3 s render, sample from the "second half")
+  does NOT hold up numerically — verified empirically before accepting
+  the numbers, same discipline as Task 4's AIR_COEF finding. At v=10 m/s
+  the listener covers 30 m in 3 s; starting at r=3.0 m it flies PAST the
+  object at t=0.3 s and spends the remaining 2.7 s RECEDING (a redshift,
+  not the approach ratio under test) — squarely inside any "second half"
+  sampling window. Fixed by starting the moving listener at r0=35 m (r(t)
+  = 35−10t stays positive and monotonically decreasing for the whole
+  render, ending at 5 m — one stable approaching regime for the entire
+  tail) while the STILL baseline (unshifted-carrier reference; capFreq is
+  position-independent) is measured at this file's usual r=3.0 m instead
+  — measured: r=35 m with a STATIC listener renders silence (rms exactly
+  0; 1/max(r,NEAR_CLAMP) amplitude falls under the splat audibility
+  floor), so pairing it with `still` would have compared a real tone
+  against noise. Also switched the test object's tint from GAP_OBJ's
+  default reddish (hueToFreq → 55 Hz — a 1.6 Hz Doppler shift, smaller
+  than one FFT bin at N=8192/48 kHz = 5.86 Hz, unmeasurable) to the
+  air-absorption test's violet override (→ 3520 Hz, a ~103 Hz shift, 17.5
+  bins — comfortably resolved). Measured ratio 1.0317 vs textbook
+  `1 + v/343 = 1.0292` (diff 0.0025, tolerance 0.006). Transport-off
+  untouched (`freezeRadii`'s Doppler fields are only read inside
+  `if (transport)` branches; `p.listenerVel` is never touched off-path) —
+  null test re-verified. Suite 25/25 green (`tests/*.test.mjs` glob); tsc
+  + legacy check clean; throughput 4.3–5.2× realtime across repeated
+  runs (Doppler adds only per-generation multiplies), comfortably above
+  the suite's ≥4× gate and the plan's ≥3× floor.

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadEngine, render, send, BASE_PARAMS } from './harness.mjs';
+import { makeFFT, hannWindow } from '../public/dsp.js';
 
 test('legacy engine renders non-silent, finite audio in the harness', async () => {
   const Legacy = await loadEngine(new URL('../public/granular-legacy.js', import.meta.url));
@@ -695,6 +696,96 @@ test('live ordering under transport: heroes stay coherent with the bed through r
   let eD = 0, eA = 0;
   for (let i = 0; i < A.length; i++) { const d = B[i] - A[i]; eD += d * d; eA += A[i] * A[i]; }
   assert.ok(eD / (eA || 1) < 0.008, `bed/hero handoff leaks under transport: residual ${(eD / (eA || 1)).toFixed(4)}`);
+});
+
+test('Doppler: an approaching listener hears the textbook ratio', async () => {
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  // sync: 1 is already GAP_OBJ's default (kept explicit, matching the
+  // brief); GAP_OBJ's crW=1/crV=0 and srW=1/srV=0 already zero out
+  // colorRandom's/sizeRandom's spread (see the air-absorption wiring
+  // test's comment above) — every captured grain shares ONE exact
+  // carrier, so the two renders' FFT peaks are directly comparable with
+  // no extra colorRandom override needed. Carrier choice: GAP_OBJ's own
+  // reddish tint (0.8, 0.2, 0.2) hueToFreq's to the LOW end (55 Hz) — a
+  // ~1.6 Hz Doppler shift on that is smaller than one FFT bin (5.86 Hz at
+  // N=8192) and unmeasurable. This test needs frequency PRECISION, so it
+  // reuses the air-absorption wiring test's VIOLET override (hue clamps
+  // to hueToFreq's top end, 3520 Hz — same trick, same reason: a subtle
+  // effect needs the highest carrier this engine has to resolve it).
+  const obj = { ...GAP_OBJ, tintR: 0.9, tintG: 0.2, tintB: 0.9, sync: 1 };
+  const v = 10; // m/s, listener moving toward the object along -z
+
+  // Distance choice for the MOVING render (deliberately NOT this file's
+  // usual r=3.0m): at v=10 m/s over the full 3s render the listener
+  // covers 30m. Starting at r=3.0m (like the static-listener tests above)
+  // the listener would fly PAST the object at t=0.3s and spend the
+  // remaining 2.7s RECEDING — a REDSHIFT, not the approach ratio this
+  // test targets — squarely inside the tail window an FFT needs for
+  // frequency resolution. Starting at r0=35m keeps r(t) = 35 − 10t
+  // monotonically decreasing and always positive (5m at t=3s) — one
+  // stable "approaching" regime for the WHOLE render, with the
+  // strongest, closest-range signal landing right where the FFT tail
+  // samples it. Only the LISTENER's start point moves for `appr`; the
+  // object stays exactly where GAP_OBJ puts it (its capture reach is
+  // about the particle field, unaffected by how far the listener starts).
+  const r0 = 35;
+  const z0 = obj.centerZ + r0;
+  const moving = {
+    ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1,
+    objects: [obj], listener: [0, 1.7, z0], listenerVel: [0, 0, -v],
+  };
+  globalThis.currentTime = 0;
+  // `still` is the UNSHIFTED-carrier reference: since capFreq depends
+  // only on hue (position-independent), it is measured at this file's
+  // usual r=3.0m geometry — same object, zero velocity, no Doppler — not
+  // at r0=35m (which would put the static case far enough out that its
+  // 1/max(r,NEAR_CLAMP) amplitude falls under the splat audibility floor
+  // and renders silence, measured: rms 0 at r=35m with no motion).
+  const still = render(new Engine(), 3.0, {
+    ...moving, listener: [0, 1.7, 4.4], listenerVel: [0, 0, 0],
+  }).L.slice(48000);
+  globalThis.currentTime = 0;
+  // onQuantum drives the SAME motion the constant listenerVel declares
+  // (128 samples/quantum at 48 kHz — the harness's process() quantum
+  // size) — a mismatch here would make the frozen rdot (derived from
+  // listenerVel) disagree with the actual geometry (derived from
+  // listener), corrupting the measurement.
+  const appr = render(new Engine(), 3.0, moving, (q) => ({
+    listener: [0, 1.7, z0 - (q * 128 / 48000) * v], listenerVel: [0, 0, -v],
+  })).L.slice(48000);
+
+  // Parabolic-interpolated FFT peak: an 8192-pt Hann-windowed slice from
+  // the TAIL of the (already 1s-trimmed) buffer — steady state, well
+  // inside the monotonic-approach regime the distance choice above
+  // guarantees for the entire render.
+  const peakF = (buf) => {
+    const N = 8192;
+    const fft = makeFFT(N);
+    const win = hannWindow(N);
+    const off = buf.length - N;
+    const re = new Float32Array(N);
+    const im = new Float32Array(N);
+    for (let i = 0; i < N; i++) re[i] = buf[off + i] * win[i];
+    fft.fft(re, im);
+    let peakBin = 1, peakMag = -Infinity;
+    const mag = new Float32Array(N / 2);
+    for (let k = 1; k < N / 2; k++) {
+      mag[k] = Math.log(re[k] * re[k] + im[k] * im[k] + 1e-20);
+      if (mag[k] > peakMag) { peakMag = mag[k]; peakBin = k; }
+    }
+    // parabolic interpolation of the log-magnitude peak (3-point, the
+    // standard formula for a quadratic fit through the peak and its
+    // neighbors)
+    const y0 = mag[peakBin - 1], y1 = mag[peakBin], y2 = mag[peakBin + 1];
+    const denom = y0 - 2 * y1 + y2;
+    const delta = denom !== 0 ? 0.5 * (y0 - y2) / denom : 0;
+    return ((peakBin + delta) * 48000) / N;
+  };
+  const ratio = peakF(appr) / peakF(still);
+  // textbook Doppler ratio for a listener approaching a stationary source
+  // at v m/s in air (SPEED_OF_SOUND = 343 m/s): fE/f = 1 + v/c
+  const expected = 1 + v / 343;
+  assert.ok(Math.abs(ratio - expected) < 0.006, `Doppler ratio ${ratio.toFixed(4)} vs ${expected.toFixed(4)}`);
 });
 
 test('throughput: worklet renders faster than 4x realtime under load', async () => {

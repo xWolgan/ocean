@@ -405,8 +405,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // detects staleness. Preallocated: the hop path allocates nothing.
     this.bedRL = new Float32Array(POOL * TRANSPORT_RING);
     this.bedRR = new Float32Array(POOL * TRANSPORT_RING);
+    // Doppler (Task 5): rdotL/rdotR ride the SAME ring, same tag, same
+    // freeze instant as rL/rR — a grain's carrier shift is frozen exactly
+    // when its geometry is (see freezeRadii).
+    this.bedRdotL = new Float32Array(POOL * TRANSPORT_RING);
+    this.bedRdotR = new Float32Array(POOL * TRANSPORT_RING);
     this.bedRTag = new Float64Array(POOL * TRANSPORT_RING).fill(NaN);
-    this.bedREar = [0, 0]; // freezeRadii out-scratch [rL, rR]
+    this.bedREar = [0, 0, 0, 0]; // freezeRadii out-scratch [rL, rR, rdotL, rdotR]
 
     // air absorption (Task 4): exp(-AIR_COEF*f²*r) baked into a 2D
     // [fBucket x rStep] LUT here at construction — Math.exp/Math.pow never
@@ -711,20 +716,23 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             // flight never bends when the listener moves. Anchor is the
             // same closed-form cycle anchor the off path splats with;
             // the helper shifts it by the flight time (see
-            // splatBurstArrival's derivation).
+            // splatBurstArrival's derivation). Doppler (Task 5): dopL/dopR
+            // = 1 − rdot/c, frozen in the SAME freezeRadii call above.
             this.freezeRadii(k, gO, gO * 16 + s.asg + 2, s.px, s.py, s.pz, rr);
             const anchor = Math.ceil(cycStart * sampleRate) / sampleRate;
             const envO = this.objEnvLUT[s.asg] || this.envLUT;
             const base = s.capAmp0 * wCap * bedG;
+            const dopL = 1 - rr[2] / SPEED_OF_SOUND;
+            const dopR = 1 - rr[3] / SPEED_OF_SOUND;
             const sL = this.splatBurstArrival(
               this.bedReL, this.bedImL, tHop, tEnd, bStart, bLen,
-              rr[0] / SPEED_OF_SOUND, rr[0], anchor, s.capFreq,
+              rr[0] / SPEED_OF_SOUND, rr[0], anchor, s.capFreq, dopL,
               base / Math.max(rr[0], NEAR_CLAMP),
               envO, s.capSat, s.capTableA, s.capTableB, s.capTableFrac,
             );
             const sR = this.splatBurstArrival(
               this.bedReR, this.bedImR, tHop, tEnd, bStart, bLen,
-              rr[1] / SPEED_OF_SOUND, rr[1], anchor, s.capFreq,
+              rr[1] / SPEED_OF_SOUND, rr[1], anchor, s.capFreq, dopR,
               base / Math.max(rr[1], NEAR_CLAMP),
               envO, s.capSat, s.capTableA, s.capTableB, s.capTableFrac,
             );
@@ -847,19 +855,22 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           // per-ear arrival for the free mass — same contract as the
           // captured transport block above: frozen radii per (voice,
           // generation, ear), 1/max(rE, NEAR_CLAMP) amplitude, no pan,
-          // no bassMono; the slot anchor travels with the grain.
+          // no bassMono; the slot anchor travels with the grain. Doppler
+          // (Task 5): dopL/dopR = 1 − rdot/c, frozen in the SAME call.
           this.freezeRadii(k, g, g * 16 + 1, s.fx, s.fy, s.fz, rr);
           const anchor = Math.ceil(slotStart * sampleRate) / sampleRate;
           const base = s.amp0 * wFree * bedG;
+          const dopL = 1 - rr[2] / SPEED_OF_SOUND;
+          const dopR = 1 - rr[3] / SPEED_OF_SOUND;
           const sL = this.splatBurstArrival(
             this.bedReL, this.bedImL, tHop, tEnd, bStart, bLen,
-            rr[0] / SPEED_OF_SOUND, rr[0], anchor, s.freeFreq,
+            rr[0] / SPEED_OF_SOUND, rr[0], anchor, s.freeFreq, dopL,
             base / Math.max(rr[0], NEAR_CLAMP),
             this.envLUT, s.freeSat, s.freeTableA, s.freeTableB, s.freeTableFrac,
           );
           const sR = this.splatBurstArrival(
             this.bedReR, this.bedImR, tHop, tEnd, bStart, bLen,
-            rr[1] / SPEED_OF_SOUND, rr[1], anchor, s.freeFreq,
+            rr[1] / SPEED_OF_SOUND, rr[1], anchor, s.freeFreq, dopR,
             base / Math.max(rr[1], NEAR_CLAMP),
             this.envLUT, s.freeSat, s.freeTableA, s.freeTableB, s.freeTableFrac,
           );
@@ -1017,33 +1028,50 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  (|g|·16 ≪ 2^53). Ring slot = g mod TRANSPORT_RING; the ring is
    *  sized so two generations live in one hop's widened window can
    *  never share a slot (see the TRANSPORT_RING comment), and a stale
-   *  tag simply recomputes. Writes [rL, rR] into `out`; no allocation.
+   *  tag simply recomputes. Writes [rL, rR, rdotL, rdotR] into `out`; no
+   *  allocation.
+   *
+   *  Doppler (Task 5): rdotE = −dot(unit(grainPos − earE), listenerVel) is
+   *  the range rate dr/dt at THIS SAME freeze instant (negative while
+   *  approaching) — frozen alongside rE per the shared-formula spec, so a
+   *  grain's received pitch never bends mid-flight any more than its
+   *  delay does.
    *
    *  Stage-2 note: on the GPU this whole cache disappears — the splat
-   *  shader computes the same two distances per grain from the frozen
-   *  per-generation ear uniform, closed-form and state-free. */
+   *  shader computes the same two distances (and range rates) per grain
+   *  from the frozen per-generation ear uniform, closed-form and
+   *  state-free. */
   freezeRadii(k, g, tag, x, y, z, out) {
     const idx = k * TRANSPORT_RING + (((g % TRANSPORT_RING) + TRANSPORT_RING) % TRANSPORT_RING);
     if (this.bedRTag[idx] === tag) {
       out[0] = this.bedRL[idx];
       out[1] = this.bedRR[idx];
+      out[2] = this.bedRdotL[idx];
+      out[3] = this.bedRdotR[idx];
       return;
     }
     const eL = this.earL;
     const eR = this.earR;
+    const lv = this.p.listenerVel;
     let dx = x - eL[0];
     let dy = y - eL[1];
     let dz = z - eL[2];
     const rL = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const rdotL = rL > 1e-6 ? -(dx * lv[0] + dy * lv[1] + dz * lv[2]) / rL : 0;
     dx = x - eR[0];
     dy = y - eR[1];
     dz = z - eR[2];
     const rR = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const rdotR = rR > 1e-6 ? -(dx * lv[0] + dy * lv[1] + dz * lv[2]) / rR : 0;
     this.bedRTag[idx] = tag;
     this.bedRL[idx] = rL;
     this.bedRR[idx] = rR;
+    this.bedRdotL[idx] = rdotL;
+    this.bedRdotR[idx] = rdotR;
     out[0] = rL;
     out[1] = rR;
+    out[2] = rdotL;
+    out[3] = rdotR;
   }
 
   /** TRANSPORT (Task 4): air absorption gain exp(-AIR_COEF·f²·r), read
@@ -1147,9 +1175,31 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  highs die faster than its lows, exactly like the emitted anchor
    *  above translates the WHOLE spectrum rigidly by dE while absorption
    *  shapes each partial's amplitude independently.
+   *
+   *  Doppler (Task 5): with a MOVING listener the retarded delay is not
+   *  constant across the grain's lifetime. `dopplerMul` = 1 − rdot/c is
+   *  frozen alongside dE/rE (freezeRadii) from the range rate rdot at the
+   *  SAME freeze instant. Linearizing the retarded delay around that
+   *  instant, d(t) ≈ dE + (rdot/c)·(t − anchor), and substituting into the
+   *  emitted closed form y_emit(t) = sin(2πf·(t − anchor)) gives
+   *      y_ear(t) = sin(2πf·(t − d(t) − anchor))
+   *               ≈ sin(2πf·(1 − rdot/c)·(t − anchor − dE))
+   *               = sin(2πfE·(t − anchorE)),   fE = f·(1 − rdot/c)
+   *  — to first order in rdot/c, the moving-listener grain is the SAME
+   *  closed form as the static case with the carrier (fundamental AND
+   *  each partial h·f) replaced by fE everywhere it drives PHASE (bin,
+   *  ph, php below); anchorE, dE and the envelope's retarded clock are
+   *  UNCHANGED — Doppler bends perceived pitch, not arrival timing. This
+   *  is the same order of approximation the frozen-rE contract already
+   *  makes: honest for grains ≤100ms at listener speeds ≤20 m/s (worst-
+   *  case intra-grain error ~0.6%, per the plan's bound). Air absorption
+   *  stays on the TRUE (unshifted) frequency passed in as `freq`/`hFreq`:
+   *  physically the wave travels the medium at its emitted frequency —
+   *  the shift is a receiver-side artifact of relative motion, not a
+   *  change in what interacts with the air along the path.
    *  Returns true if anything was splatted (the caller's `sounding`).
    *  Block-rate; no allocation, no pow, no per-sample trig. */
-  splatBurstArrival(re, im, tHop, tEnd, bStart, bLen, dE, rE, anchor, freq, amp0,
+  splatBurstArrival(re, im, tHop, tEnd, bStart, bLen, dE, rE, anchor, freq, dopplerMul, amp0,
     envO, sat, tableA, tableB, tf) {
     const blockT = BLOCK / sampleRate;
     const bStartE = bStart + dE; // the arrival window is the emission
@@ -1195,8 +1245,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     }
     if (amp <= 0.0002) return false;
     const anchorE = anchor + dE;
-    const bin = (freq * BLOCK) / sampleRate;
-    const ph = (2 * Math.PI * freq * (tHop - anchorE) - Math.PI / 2) % (2 * Math.PI);
+    // Doppler (Task 5): fE = f·dopplerMul drives bin/phase; absorption
+    // below stays on the true `freq`/`hFreq` (see this method's doc
+    // comment for the derivation).
+    const freqE = freq * dopplerMul;
+    const bin = (freqE * BLOCK) / sampleRate;
+    const ph = (2 * Math.PI * freqE * (tHop - anchorE) - Math.PI / 2) % (2 * Math.PI);
     // same two-wavetable 1/peak blend as the off path
     const invPA = this.wheelInvPeak[tableA];
     const invPB = this.wheelInvPeak[tableB];
@@ -1209,16 +1263,19 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         const w = sat * (side === 0 ? (1 - tf) * invPA : tf * invPB);
         for (let q = 1; q < rec.length; q++) { // q=0 is the fundamental
           const [hh, ha] = rec[q];
-          const fb = (freq * hh * BLOCK) / sampleRate;
+          const hFreq = freq * hh; // true partial frequency — absorption axis
+          const fb = (hFreq * dopplerMul * BLOCK) / sampleRate;
           if (fb >= BLOCK / 2 - KERNEL_HW) break;
           const pa = amp * w * ha;
           if (pa <= 0.000002) continue;
           // partial h rides the SAME displaced anchor: the whole
           // spectrum of the grain arrives together, but each partial's
           // OWN frequency (freq·hh) gets its own absorption lookup —
-          // highs really do die faster than lows within one grain
-          const php = (2 * Math.PI * freq * hh * (tHop - anchorE) - Math.PI / 2) % (2 * Math.PI);
-          splatBlob(re, im, BLOCK, fb, pa * this.airGain(freq * hh, rE), php, gker, shift);
+          // highs really do die faster than lows within one grain — AND
+          // its own Doppler-shifted phase (hFreq·dopplerMul), consistent
+          // with the fundamental above
+          const php = (2 * Math.PI * hFreq * dopplerMul * (tHop - anchorE) - Math.PI / 2) % (2 * Math.PI);
+          splatBlob(re, im, BLOCK, fb, pa * this.airGain(hFreq, rE), php, gker, shift);
         }
       }
     }
@@ -1775,12 +1832,17 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         this.freezeRadii(k, v.gen, v.gen * 16 + 1, v.fx, v.fy, v.fz, rr2);
         let fdL = rr2[0] / SPEED_OF_SOUND, fdR = rr2[1] / SPEED_OF_SOUND;
         let fiL = 1 / Math.max(rr2[0], NEAR_CLAMP), fiR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+        // Doppler (Task 5): per-ear carrier multiplier 1 − rdot/c, frozen
+        // alongside fdL/fdR/fiL/fiR from the SAME freezeRadii call — read
+        // before rr2 is overwritten by the capture branch below.
+        let fEmL = 1 - rr2[2] / SPEED_OF_SOUND, fEmR = 1 - rr2[3] / SPEED_OF_SOUND;
         let faF = Math.ceil(((v.gen - v.phi) / invLFree) * sampleRate) / sampleRate;
-        let cdL = 0, cdR = 0, ciL = 0, ciR = 0, caO = 0;
+        let cdL = 0, cdR = 0, ciL = 0, ciR = 0, caO = 0, cEmL = 1, cEmR = 1;
         if (v.capOn) {
           this.freezeRadii(k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
           cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
           ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+          cEmL = 1 - rr2[2] / SPEED_OF_SOUND; cEmR = 1 - rr2[3] / SPEED_OF_SOUND;
           caO = Math.ceil(((v.asgGen - v.asgPhi) / v.asgInvTau) * sampleRate) / sampleRate;
         }
         // Task 4: per-ear one-pole approximating air absorption at this
@@ -1826,11 +1888,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             this.freezeRadii(k, gFn, gFn * 16 + 1, v.fx, v.fy, v.fz, rr2);
             fdL = rr2[0] / SPEED_OF_SOUND; fdR = rr2[1] / SPEED_OF_SOUND;
             fiL = 1 / Math.max(rr2[0], NEAR_CLAMP); fiR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+            fEmL = 1 - rr2[2] / SPEED_OF_SOUND; fEmR = 1 - rr2[3] / SPEED_OF_SOUND;
             faF = Math.ceil(((gFn - v.phi) / invLFree) * sampleRate) / sampleRate;
             if (v.capOn) {
               this.freezeRadii(k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
               cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
               ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+              cEmL = 1 - rr2[2] / SPEED_OF_SOUND; cEmR = 1 - rr2[3] / SPEED_OF_SOUND;
               caO = Math.ceil(((v.asgGen - v.asgPhi) / v.asgInvTau) * sampleRate) / sampleRate;
             }
           }
@@ -1844,6 +1908,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
                 this.freezeRadii(k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
                 cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
                 ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+                cEmL = 1 - rr2[2] / SPEED_OF_SOUND; cEmR = 1 - rr2[3] / SPEED_OF_SOUND;
                 caO = Math.ceil(((v.asgGen - v.asgPhi) / v.asgInvTau) * sampleRate) / sampleRate;
               }
             }
@@ -1851,18 +1916,20 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           // emission loudness (amp0/capAmp0 carry bassBoost, NOT the
           // spatialize magnitude — 1/max(rE,·) replaces it per ear) times
           // the bed's exact particle weight, so hero and bed agree
-          let emitAmp, dL, dR, iL, iR, anch, freq, sat, tf, tAarr, tBarr, lutC;
+          let emitAmp, dL, dR, iL, iR, anch, freq, emL, emR, sat, tf, tAarr, tBarr, lutC;
           if (captured) {
             const o = p.objects[v.asg];
             const wCap = (sqrtW + (W - sqrtW) * o.sync) * p.objectGain;
             emitAmp = v.capAmp0 * wCap;
             dL = cdL; dR = cdR; iL = ciL; iR = ciR; anch = caO; freq = v.capFreq;
+            emL = cEmL; emR = cEmR; // Doppler (Task 5): frozen 1 − rdot/c
             sat = v.capSat; tf = v.capTableFrac;
             tAarr = this.wheel[v.capTableA]; tBarr = this.wheel[v.capTableB];
             lutC = objEnvLUT[v.asg] || envLUT;
           } else {
             emitAmp = v.amp0 * wFreeHero;
             dL = fdL; dR = fdR; iL = fiL; iR = fiR; anch = faF; freq = v.freeFreq;
+            emL = fEmL; emR = fEmR; // Doppler (Task 5): frozen 1 − rdot/c
             sat = v.freeSat; tf = v.freeTableFrac;
             tAarr = this.wheel[v.freeTableA]; tBarr = this.wheel[v.freeTableB];
             lutC = envLUT;
@@ -1876,7 +1943,9 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           if (emitAmp * invNear > 0.0002) {
             const hg = this.heroGain[k];
             // ear L: envelope age from tL = t − dL (aa<0 → not yet arrived,
-            // silent, natural), carrier at tL against the shared anchor
+            // silent, natural — UNSHIFTED by Doppler, per the closed-form
+            // derivation in splatBurstArrival's doc comment), carrier at
+            // tL against the shared anchor, using the frozen fE = freq·emL
             const tL = t - dL;
             const aaL = captured
               ? (tL * v.asgInvTau + v.asgPhi - v.asgGen) / 0.6
@@ -1885,7 +1954,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             if (aaL > 0 && aaL < 1) {
               const env = lutC.lut[(aaL * ENV_LUT_SIZE) | 0];
               if (env > 0.0001) {
-                let ph = ((tL - anch) * freq) % 1;
+                let ph = ((tL - anch) * freq * emL) % 1;
                 if (ph < 0) ph += 1;
                 const idx = (ph * TABLE_SIZE) & TABLE_MASK;
                 const osc = sine[idx] * (1 - sat) + (tAarr[idx] * (1 - tf) + tBarr[idx] * tf) * sat;
@@ -1907,7 +1976,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             if (aaR > 0 && aaR < 1) {
               const env = lutC.lut[(aaR * ENV_LUT_SIZE) | 0];
               if (env > 0.0001) {
-                let ph = ((tR - anch) * freq) % 1;
+                let ph = ((tR - anch) * freq * emR) % 1;
                 if (ph < 0) ph += 1;
                 const idx = (ph * TABLE_SIZE) & TABLE_MASK;
                 const osc = sine[idx] * (1 - sat) + (tAarr[idx] * (1 - tf) + tBarr[idx] * tf) * sat;
