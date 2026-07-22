@@ -223,22 +223,59 @@ const FDN_DELAYS = [1031, 1327, 1523, 1801]; // samples, transport mode only
 const FDN_SEND = 0.12;
 
 const POOL = 256;
-// per-voice frozen-radius ring slots (transport): must cover the widest
-// generation window one hop can enumerate, so tags never collide within
-// a burst's flight — a collision can't corrupt the CURRENT hop's own
-// arithmetic (evaluateCapture/refreshFreeGeneration always resync s.px/
-// s.fx to the generation being processed before freezeRadii reads them),
-// but it WOULD let a still-in-flight grain's frozen geometry be silently
-// evicted and recomputed against a later listener position on revisit —
-// exactly the foreign-clock bend this ring exists to prevent. Recomputed
-// for Task 6's DMAX 0.03 -> 0.09 (the free-timeline case is the binding
-// one, and more than doubles): free timeline at the UI tau floor
-// 0.00025 s: slotLen ≥ 0.00025·0.5·1.8 = 0.000225 s, window = blockT
-// 0.02133 + DMAX 0.09 + 0.75·slotLen = 0.11150 s -> 0.11150/0.000225 ≈
-// 496 slots; captured at the ingestion tau floor 0.0005 s:
-// (0.02133 + 0.09)/0.0005 + 0.6 ≈ 224 cycles. 512 ≥ both (256 sufficed
-// only for the old DMAX 0.03's ≈229/104).
-const TRANSPORT_RING = 512;
+// per-voice frozen-radius rings (transport), ONE PER TIMELINE — indexed
+// by TL_FREE/TL_CAP below; the image rings share the same pair. A ring
+// must cover the widest generation window one hop can enumerate, so
+// tags never collide within a burst's flight — a collision can't
+// corrupt the CURRENT hop's own arithmetic (evaluateCapture/
+// refreshFreeGeneration always resync s.px/s.fx to the generation being
+// processed before freezeRadii reads them), but it WOULD let a
+// still-in-flight grain's frozen geometry be silently evicted and
+// recomputed against a later listener position on revisit — exactly the
+// foreign-clock bend these rings exist to prevent.
+//
+// WHY per-timeline rings (final review, measured): a single shared ring
+// indexed `g mod N` with the timeline only in the TAG let the two
+// timelines collide. A captured hero voice freezes BOTH its timelines
+// every quantum (free at v.gen, captured at v.asgGen); whenever
+// gFree ≡ gObj (mod N) the two tags thrashed ONE slot, and every
+// revisit re-froze "frozen" geometry from the CURRENT listener pose —
+// block-rate phase steps in the hero closed form, hop-to-hop arrival
+// drift in the bed, under exactly the moving listener (VR head motion)
+// transport exists for. Voices whose two counters advance at near-equal
+// rates (slotJitter ≈ 0.556 at matched taus) stay residue-locked for
+// SECONDS. Measured on the shared ring: 19,094 cross-timeline evictions
+// over a 6 s moving-listener render (the sentinel test's scenario);
+// with split rings the collision is structurally impossible — a ring
+// only ever holds one timeline's tags — and the frozenRecomputes
+// sentinel (constructor) pins it at exactly 0.
+// (Within the CAPTURED ring, an object-to-object HANDOFF can still in
+// principle collide — two objects' unrelated generation counters mod
+// RING slots — but a handoff retires the old object's in-flight window
+// for that voice, so a stale eviction there is transient and
+// self-healing, unlike the permanent two-timelines-one-voice interleave
+// the split removes. Not counted by the sentinel: it compares timeline
+// CLASSES, free vs captured.)
+//
+// Sizing, per ring (margin arithmetic redone for the final review,
+// including the global-tau-floor case — ledger item 8):
+// FREE (512 slots): window = blockT 0.02133 + DMAX 0.09 lookback +
+//   0.75·slotLen. Global p.tau comes from lifespanToTau with lifespan
+//   bus-clamped to [0,1] (ModulationBus RANGES), so tau ≥ 0.001 s →
+//   slotLen ≥ 0.001·0.5·1.8 = 0.0009 s → ≈124 slots (≈4× margin) in
+//   any state the UI can actually produce. The worklet itself does NOT
+//   clamp p.tau (unlike object tau below), so the ring is sized
+//   defensively for the smallest tau reachable ANYWHERE in the system —
+//   the per-object floor lifespanToTau(0)/2^octave = 0.001/4 =
+//   0.00025 s: slotLen ≥ 0.000225 s, window 0.11150 s → ≈496 slots
+//   ≤ 512. Coverage holds even at that floor (margin 16 slots).
+// CAPTURED (256 slots): object tau IS floored in this file at params
+//   ingestion (0.0005 s, mirroring the GPU clamp), so the guarantee is
+//   worklet-enforced: window = blockT 0.02133 + DMAX 0.09 + 0.6·tau
+//   lookback = 0.11163 s → ≈224 cycles ≤ 256 (≈14% margin).
+const TL_FREE = 0; // ring selector: the free timeline
+const TL_CAP = 1; // ring selector: the captured (object) timelines
+const TRANSPORT_RING = [512, 256]; // slots, indexed [TL_FREE, TL_CAP]
 // calibrated against legacy engine RMS, Task 5 (measured total-level
 // offset with the grain-kernel family, slot-anchored phases and true
 // wavetable blend in place; see task-5-report.md, fix round 2)
@@ -590,18 +627,46 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // (fillBed writes it; process() reads it for the bed stats field)
     this.bedSpat = [0, 0]; // scratch for fillBed's spatialize calls — no per-hop alloc
     // frozen per (voice, generation, ear) transport radii — see
-    // freezeRadii. Generation-indexed rings per voice; the Float64 tag
+    // freezeRadii. Generation-indexed rings per voice, ONE PER TIMELINE
+    // (outer index TL_FREE/TL_CAP — see TRANSPORT_RING's comment for the
+    // cross-timeline collision this split removes); the Float64 tag
     // (NaN = never written, and NaN !== NaN keeps empty slots cold)
     // detects staleness. Preallocated: the hop path allocates nothing.
-    this.bedRL = new Float32Array(POOL * TRANSPORT_RING);
-    this.bedRR = new Float32Array(POOL * TRANSPORT_RING);
+    this.bedRL = [
+      new Float32Array(POOL * TRANSPORT_RING[TL_FREE]),
+      new Float32Array(POOL * TRANSPORT_RING[TL_CAP]),
+    ];
+    this.bedRR = [
+      new Float32Array(POOL * TRANSPORT_RING[TL_FREE]),
+      new Float32Array(POOL * TRANSPORT_RING[TL_CAP]),
+    ];
     // Doppler (Task 5): rdotL/rdotR ride the SAME ring, same tag, same
     // freeze instant as rL/rR — a grain's carrier shift is frozen exactly
     // when its geometry is (see freezeRadii).
-    this.bedRdotL = new Float32Array(POOL * TRANSPORT_RING);
-    this.bedRdotR = new Float32Array(POOL * TRANSPORT_RING);
-    this.bedRTag = new Float64Array(POOL * TRANSPORT_RING).fill(NaN);
+    this.bedRdotL = [
+      new Float32Array(POOL * TRANSPORT_RING[TL_FREE]),
+      new Float32Array(POOL * TRANSPORT_RING[TL_CAP]),
+    ];
+    this.bedRdotR = [
+      new Float32Array(POOL * TRANSPORT_RING[TL_FREE]),
+      new Float32Array(POOL * TRANSPORT_RING[TL_CAP]),
+    ];
+    this.bedRTag = [
+      new Float64Array(POOL * TRANSPORT_RING[TL_FREE]).fill(NaN),
+      new Float64Array(POOL * TRANSPORT_RING[TL_CAP]).fill(NaN),
+    ];
     this.bedREar = [0, 0, 0, 0]; // freezeRadii out-scratch [rL, rR, rdotL, rdotR]
+    // DETERMINISM SENTINEL (not telemetry — a harness-visible invariant
+    // counter, asserted exactly 0 by the cross-timeline-thrash regression
+    // test): counts ring evictions where a slot's frozen tag belonged to
+    // the OTHER timeline class (free vs captured) than the tag claiming
+    // it. Such an eviction means a still-in-flight grain's frozen
+    // geometry was thrown away and will be recomputed against a LATER
+    // listener pose on revisit — the foreign-clock bend the freeze rings
+    // exist to prevent. Cost: one class comparison on ring MISSES only
+    // (freezeRadii/freezeImageRadii), nothing in the hit path, nothing
+    // per sample.
+    this.frozenRecomputes = 0;
 
     // air absorption (Task 4): exp(-AIR_COEF*f²*r) baked into a 2D
     // [fBucket x rStep] LUT here at construction — Math.exp/Math.pow never
@@ -638,29 +703,40 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // constructor's updateEars() call, since updateWallMirrors needs them
     // to already exist.)
     // frozen per (voice, generation) image ranges/range-rates, one ring
-    // PER WALL per ear — the SAME freezing contract as bedRL/bedRR/
-    // bedRdotL/bedRdotR above (freezeImageRadii is freezeRadii's Task-6
-    // twin). Only ever written for BUDGETED voices (imageMask), so this
-    // memory buys a rarely-touched cache, not a hot-loop cost.
-    this.bedIRL = []; this.bedIRR = [];
-    this.bedIRdotL = []; this.bedIRdotR = [];
-    for (let w = 0; w < 6; w++) {
-      this.bedIRL.push(new Float32Array(POOL * TRANSPORT_RING));
-      this.bedIRR.push(new Float32Array(POOL * TRANSPORT_RING));
-      this.bedIRdotL.push(new Float32Array(POOL * TRANSPORT_RING));
-      this.bedIRdotR.push(new Float32Array(POOL * TRANSPORT_RING));
+    // PER WALL per ear, per TIMELINE (outer index TL_FREE/TL_CAP: the
+    // free/captured image freezes shared the identical cross-timeline
+    // collision the direct rings had — see TRANSPORT_RING's comment) —
+    // the SAME freezing contract as bedRL/bedRR/bedRdotL/bedRdotR above
+    // (freezeImageRadii is freezeRadii's Task-6 twin). Only ever written
+    // for BUDGETED voices (imageMask), so this memory buys a
+    // rarely-touched cache, not a hot-loop cost.
+    this.bedIRL = [[], []]; this.bedIRR = [[], []];
+    this.bedIRdotL = [[], []]; this.bedIRdotR = [[], []];
+    for (let tl = 0; tl < 2; tl++) {
+      for (let w = 0; w < 6; w++) {
+        this.bedIRL[tl].push(new Float32Array(POOL * TRANSPORT_RING[tl]));
+        this.bedIRR[tl].push(new Float32Array(POOL * TRANSPORT_RING[tl]));
+        this.bedIRdotL[tl].push(new Float32Array(POOL * TRANSPORT_RING[tl]));
+        this.bedIRdotR[tl].push(new Float32Array(POOL * TRANSPORT_RING[tl]));
+      }
     }
-    // one shared tag: all 6 walls freeze together, at the same (voice,
-    // generation) instant (see freezeImageRadii), so one NaN-clean
-    // staleness check covers all of them
-    this.bedITag = new Float64Array(POOL * TRANSPORT_RING).fill(NaN);
+    // one shared tag per timeline ring: all 6 walls freeze together, at
+    // the same (voice, generation) instant (see freezeImageRadii), so
+    // one NaN-clean staleness check covers all of them
+    this.bedITag = [
+      new Float64Array(POOL * TRANSPORT_RING[TL_FREE]).fill(NaN),
+      new Float64Array(POOL * TRANSPORT_RING[TL_CAP]).fill(NaN),
+    ];
     // frozen per-generation wall-validity mask (fix round): bit w = ear L
     // may hear wall w, bit w+6 = ear R. Validity is PART of the grain's
     // frozen geometry, not a live read — see freezeImageRadii's
     // foreign-clock note (a live read let a mid-generation listener
     // plane-crossing flip a wall valid whose radii were never computed,
     // reading rImg≈0 → a zero-delay, near-clamp-amplitude spurious blob).
-    this.bedIValid = new Uint16Array(POOL * TRANSPORT_RING);
+    this.bedIValid = [
+      new Uint16Array(POOL * TRANSPORT_RING[TL_FREE]),
+      new Uint16Array(POOL * TRANSPORT_RING[TL_CAP]),
+    ];
     this.imgOut = new Float32Array(24); // freezeImageRadii out-scratch:
     // [wall*4 + {0:rL,1:rR,2:rdotL,3:rdotR}]
     // salience budget mask (Task 6): any current hero OR this hop's
@@ -1046,7 +1122,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             // the helper shifts it by the flight time (see
             // splatBurstArrival's derivation). Doppler (Task 5): dopL/dopR
             // = 1 − rdot/c, frozen in the SAME freezeRadii call above.
-            this.freezeRadii(k, gO, gO * 16 + s.asg + 2, s.px, s.py, s.pz, rr);
+            this.freezeRadii(TL_CAP, k, gO, gO * 16 + s.asg + 2, s.px, s.py, s.pz, rr);
             const anchor = Math.ceil(cycStart * sampleRate) / sampleRate;
             const envO = this.objEnvLUT[s.asg] || this.envLUT;
             // emission loudness BEFORE the hero-crossfade complement —
@@ -1204,7 +1280,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           // generation, ear), 1/max(rE, NEAR_CLAMP) amplitude, no pan,
           // no bassMono; the slot anchor travels with the grain. Doppler
           // (Task 5): dopL/dopR = 1 − rdot/c, frozen in the SAME call.
-          this.freezeRadii(k, g, g * 16 + 1, s.fx, s.fy, s.fz, rr);
+          this.freezeRadii(TL_FREE, k, g, g * 16 + 1, s.fx, s.fy, s.fz, rr);
           const anchor = Math.ceil(slotStart * sampleRate) / sampleRate;
           // emission loudness BEFORE the hero-crossfade complement —
           // images (below) never carry bedG (see splatImageSplats)
@@ -1384,13 +1460,16 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  if the listener has moved since — control-rate listener updates
    *  take effect at natural births, and a grain never bends mid-flight.
    *
-   *  `tag` uniquely encodes (generation, timeline): g·16 + slot + 2,
-   *  slot = −1 for the free timeline, the object slot (0..7) for
-   *  captured — exact in a double far beyond any session length
-   *  (|g|·16 ≪ 2^53). Ring slot = g mod TRANSPORT_RING; the ring is
-   *  sized so two generations live in one hop's widened window can
-   *  never share a slot (see the TRANSPORT_RING comment), and a stale
-   *  tag simply recomputes. Writes [rL, rR, rdotL, rdotR] into `out`; no
+   *  `tl` routes to the timeline's OWN ring (TL_FREE/TL_CAP — every
+   *  call site knows which timeline it is freezing); `tag` uniquely
+   *  encodes (generation, timeline): g·16 + slot + 2, slot = −1 for the
+   *  free timeline, the object slot (0..7) for captured — exact in a
+   *  double far beyond any session length (|g|·16 ≪ 2^53). Ring slot =
+   *  g mod TRANSPORT_RING[tl]; each ring is sized so two of ITS OWN
+   *  generations live in one hop's widened window can never share a
+   *  slot (see the TRANSPORT_RING comment — cross-timeline sharing is
+   *  what the per-timeline split removed), and a stale tag simply
+   *  recomputes. Writes [rL, rR, rdotL, rdotR] into `out`; no
    *  allocation.
    *
    *  Doppler (Task 5): rdotE = −dot(unit(grainPos − earE), listenerVel) is
@@ -1403,14 +1482,26 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  shader computes the same two distances (and range rates) per grain
    *  from the frozen per-generation ear uniform, closed-form and
    *  state-free. */
-  freezeRadii(k, g, tag, x, y, z, out) {
-    const idx = k * TRANSPORT_RING + (((g % TRANSPORT_RING) + TRANSPORT_RING) % TRANSPORT_RING);
-    if (this.bedRTag[idx] === tag) {
-      out[0] = this.bedRL[idx];
-      out[1] = this.bedRR[idx];
-      out[2] = this.bedRdotL[idx];
-      out[3] = this.bedRdotR[idx];
+  freezeRadii(tl, k, g, tag, x, y, z, out) {
+    const N = TRANSPORT_RING[tl];
+    const idx = k * N + (((g % N) + N) % N);
+    const tagRing = this.bedRTag[tl];
+    if (tagRing[idx] === tag) {
+      out[0] = this.bedRL[tl][idx];
+      out[1] = this.bedRR[tl][idx];
+      out[2] = this.bedRdotL[tl][idx];
+      out[3] = this.bedRdotR[tl][idx];
       return;
+    }
+    // determinism sentinel (see the constructor's frozenRecomputes
+    // comment): an eviction that crosses timeline classes is a frozen
+    // grain recomputed against a foreign clock — count it. With
+    // per-timeline rings this can never fire (each ring only receives
+    // its own class); the sentinel test asserts exactly that.
+    const old = tagRing[idx];
+    if (old === old
+      && ((((old % 16) + 16) % 16) === 1) !== ((((tag % 16) + 16) % 16) === 1)) {
+      this.frozenRecomputes++;
     }
     const eL = this.earL;
     const eR = this.earR;
@@ -1425,11 +1516,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     dz = z - eR[2];
     const rR = Math.sqrt(dx * dx + dy * dy + dz * dz);
     const rdotR = rR > 1e-6 ? -(dx * lv[0] + dy * lv[1] + dz * lv[2]) / rR : 0;
-    this.bedRTag[idx] = tag;
-    this.bedRL[idx] = rL;
-    this.bedRR[idx] = rR;
-    this.bedRdotL[idx] = rdotL;
-    this.bedRdotR[idx] = rdotR;
+    tagRing[idx] = tag;
+    this.bedRL[tl][idx] = rL;
+    this.bedRR[tl][idx] = rR;
+    this.bedRdotL[tl][idx] = rdotL;
+    this.bedRdotR[tl][idx] = rdotR;
     out[0] = rL;
     out[1] = rR;
     out[2] = rdotL;
@@ -1439,11 +1530,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
   /** TRANSPORT (Task 6): 6 first-order wall-image ranges/range-rates,
    *  per ear, FROZEN per (voice k, generation g) — the SAME
    *  foreign-clock contract as freezeRadii: an echo must not bend
-   *  mid-flight any more than the direct sound does. Its own ring
-   *  (bedIRL/bedIRR/bedIRdotL/bedIRdotR × 6 walls, one shared bedITag)
-   *  rather than widening freezeRadii's, since this is only ever called
-   *  for BUDGETED voices — a small, hop-to-hop-changing subset of POOL
-   *  (see splatImageSplats / computeImageBudget).
+   *  mid-flight any more than the direct sound does. Its own rings
+   *  (bedIRL/bedIRR/bedIRdotL/bedIRdotR × 6 walls × 2 timelines, one
+   *  shared bedITag per timeline — `tl` routes exactly as in
+   *  freezeRadii) rather than widening freezeRadii's, since this is
+   *  only ever called for BUDGETED voices — a small,
+   *  hop-to-hop-changing subset of POOL (see splatImageSplats /
+   *  computeImageBudget).
    *
    *  Distance: for wall w the image source is the grain mirrored across
    *  that wall's plane, and d(image, earE) = d(grain, mirror(earE))
@@ -1484,21 +1577,34 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  the caller's mask gate guarantees that): out[w*4 + {0:rL, 1:rR,
    *  2:rdotL, 3:rdotR}] for wall w = 0..5. Returns the packed validity
    *  mask. No allocation. */
-  freezeImageRadii(k, g, tag, x, y, z, out) {
-    const idx = k * TRANSPORT_RING + (((g % TRANSPORT_RING) + TRANSPORT_RING) % TRANSPORT_RING);
-    if (this.bedITag[idx] === tag) {
-      const vm = this.bedIValid[idx];
+  freezeImageRadii(tl, k, g, tag, x, y, z, out) {
+    const N = TRANSPORT_RING[tl];
+    const idx = k * N + (((g % N) + N) % N);
+    const tagRing = this.bedITag[tl];
+    const iRL = this.bedIRL[tl];
+    const iRR = this.bedIRR[tl];
+    const iRdotL = this.bedIRdotL[tl];
+    const iRdotR = this.bedIRdotR[tl];
+    if (tagRing[idx] === tag) {
+      const vm = this.bedIValid[tl][idx];
       for (let w = 0; w < 6; w++) {
         if ((vm & (0x41 << w)) === 0) continue; // neither ear: never written
-        out[w * 4] = this.bedIRL[w][idx];
-        out[w * 4 + 1] = this.bedIRR[w][idx];
-        out[w * 4 + 2] = this.bedIRdotL[w][idx];
-        out[w * 4 + 3] = this.bedIRdotR[w][idx];
+        out[w * 4] = iRL[w][idx];
+        out[w * 4 + 1] = iRR[w][idx];
+        out[w * 4 + 2] = iRdotL[w][idx];
+        out[w * 4 + 3] = iRdotR[w][idx];
       }
       return vm;
     }
+    // determinism sentinel — same check as freezeRadii's (the image
+    // rings shared the identical cross-timeline collision pre-split)
+    const old = tagRing[idx];
+    if (old === old
+      && ((((old % 16) + 16) % 16) === 1) !== ((((tag % 16) + 16) % 16) === 1)) {
+      this.frozenRecomputes++;
+    }
     const lv = this.p.listenerVel;
-    this.bedITag[idx] = tag;
+    tagRing[idx] = tag;
     let vm = 0;
     for (let w = 0; w < 6; w++) {
       // Task 6 perf: a wall neither ear can validly hear from AT THE
@@ -1522,12 +1628,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       dx = x - mEarR[0]; dy = y - mEarR[1]; dz = z - mEarR[2];
       const rR = Math.sqrt(dx * dx + dy * dy + dz * dz);
       const rdotR = rR > 1e-6 ? -(dx * mvx + dy * mvy + dz * mvz) / rR : 0;
-      this.bedIRL[w][idx] = rL; this.bedIRR[w][idx] = rR;
-      this.bedIRdotL[w][idx] = rdotL; this.bedIRdotR[w][idx] = rdotR;
+      iRL[w][idx] = rL; iRR[w][idx] = rR;
+      iRdotL[w][idx] = rdotL; iRdotR[w][idx] = rdotR;
       out[w * 4] = rL; out[w * 4 + 1] = rR;
       out[w * 4 + 2] = rdotL; out[w * 4 + 3] = rdotR;
     }
-    this.bedIValid[idx] = vm;
+    this.bedIValid[tl][idx] = vm;
     return vm;
   }
 
@@ -1585,12 +1691,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const rr = this.bedREar;
     let allowed;
     if (s.capOn) {
-      this.freezeRadii(k, s.asgGen, s.asgGen * 16 + s.asg + 2, s.px, s.py, s.pz, rr);
+      this.freezeRadii(TL_CAP, k, s.asgGen, s.asgGen * 16 + s.asg + 2, s.px, s.py, s.pz, rr);
       const tail01 = (this.objEnvLUT[s.asg] || this.envLUT).tail01;
       // cycle: burst 0.6·cycLen, trailing gap 0.4·cycLen
       allowed = (0.4 + 0.6 * (1 - tail01)) / s.asgInvTau;
     } else {
-      this.freezeRadii(k, s.gen, s.gen * 16 + 1, s.fx, s.fy, s.fz, rr);
+      this.freezeRadii(TL_FREE, k, s.gen, s.gen * 16 + 1, s.fx, s.fy, s.fz, rr);
       // slot: burst durN·slotLen at offset offN·slotLen — exact
       // CURRENT-generation values, not a distribution worst-case
       const slotLen = this.p.tau * (this.voices[k].slotJitter * 1.8);
@@ -1807,13 +1913,16 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  `timelineTag` is the same slot discriminator freezeRadii's callers
    *  already pass (1 = free, asg+2 = captured); combined with `g` here
    *  into freezeImageRadii's tag, exactly mirroring freezeRadii's own
-   *  `g*16+slot` scheme.
+   *  `g*16+slot` scheme — and it also selects the timeline's own image
+   *  ring (TL_FREE/TL_CAP), same routing as every direct freeze.
    *
    *  Returns true if anything splatted, for the caller's `sounding`. */
   splatImageSplats(k, g, timelineTag, x, y, z, tHop, tEnd, bStart, bLen, anchor,
     freq, base, envO, sat, tableA, tableB, tf) {
     const out = this.imgOut;
-    const vm = this.freezeImageRadii(k, g, g * 16 + timelineTag, x, y, z, out);
+    const vm = this.freezeImageRadii(
+      timelineTag === 1 ? TL_FREE : TL_CAP, k, g, g * 16 + timelineTag, x, y, z, out,
+    );
     let sounding = false;
     for (let w = 0; w < 6; w++) {
       if (vm & (1 << w)) {
@@ -2395,7 +2504,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         // structure: a second cursor would only be redundant state able to
         // drift from the first).
         const rr2 = earScratch;
-        this.freezeRadii(k, v.gen, v.gen * 16 + 1, v.fx, v.fy, v.fz, rr2);
+        this.freezeRadii(TL_FREE, k, v.gen, v.gen * 16 + 1, v.fx, v.fy, v.fz, rr2);
         let fdL = rr2[0] / SPEED_OF_SOUND, fdR = rr2[1] / SPEED_OF_SOUND;
         let fiL = 1 / Math.max(rr2[0], NEAR_CLAMP), fiR = 1 / Math.max(rr2[1], NEAR_CLAMP);
         // Doppler (Task 5): per-ear carrier multiplier 1 − rdot/c, frozen
@@ -2405,7 +2514,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         let faF = Math.ceil(((v.gen - v.phi) / invLFree) * sampleRate) / sampleRate;
         let cdL = 0, cdR = 0, ciL = 0, ciR = 0, caO = 0, cEmL = 1, cEmR = 1;
         if (v.capOn) {
-          this.freezeRadii(k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
+          this.freezeRadii(TL_CAP, k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
           cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
           ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
           cEmL = 1 - rr2[2] / SPEED_OF_SOUND; cEmR = 1 - rr2[3] / SPEED_OF_SOUND;
@@ -2451,13 +2560,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           if (gFn !== v.gen) {
             this.refreshFreeGeneration(v, gFn, spat, v);
             if (anyObjects) this.evaluateCapture(v, t, spat, v);
-            this.freezeRadii(k, gFn, gFn * 16 + 1, v.fx, v.fy, v.fz, rr2);
+            this.freezeRadii(TL_FREE, k, gFn, gFn * 16 + 1, v.fx, v.fy, v.fz, rr2);
             fdL = rr2[0] / SPEED_OF_SOUND; fdR = rr2[1] / SPEED_OF_SOUND;
             fiL = 1 / Math.max(rr2[0], NEAR_CLAMP); fiR = 1 / Math.max(rr2[1], NEAR_CLAMP);
             fEmL = 1 - rr2[2] / SPEED_OF_SOUND; fEmR = 1 - rr2[3] / SPEED_OF_SOUND;
             faF = Math.ceil(((gFn - v.phi) / invLFree) * sampleRate) / sampleRate;
             if (v.capOn) {
-              this.freezeRadii(k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
+              this.freezeRadii(TL_CAP, k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
               cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
               ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
               cEmL = 1 - rr2[2] / SPEED_OF_SOUND; cEmR = 1 - rr2[3] / SPEED_OF_SOUND;
@@ -2471,7 +2580,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
               this.evaluateCapture(v, t, spat, v);
               captured = v.capOn;
               if (captured) {
-                this.freezeRadii(k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
+                this.freezeRadii(TL_CAP, k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
                 cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
                 ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
                 cEmL = 1 - rr2[2] / SPEED_OF_SOUND; cEmR = 1 - rr2[3] / SPEED_OF_SOUND;

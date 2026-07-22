@@ -1017,6 +1017,54 @@ test('wall validity freezes with the grain: mid-generation plane crossings stay 
   assert.ok(rFlip < rStill * 1.5, `plane-crossing energy anomaly: flip rms ${rFlip} vs still ${rStill}`);
 });
 
+test('frozen geometry stays frozen: the timelines never evict each other\'s in-flight grains', async () => {
+  // Final-review regression guard for the per-timeline freeze rings.
+  // The bug it pins dead: with ONE ring indexed `g mod N` and the
+  // timeline only in the tag, a captured hero voice freezes BOTH its
+  // timelines every quantum (free at v.gen, captured at v.asgGen), and
+  // whenever gFree ≡ gObj (mod N) the two tags thrash a single slot —
+  // every revisit RE-FROZE "frozen" geometry from the CURRENT listener
+  // pose: block-rate phase steps in the hero closed form, hop-to-hop
+  // arrival drift in the bed, under exactly the moving listener (VR head
+  // sway) transport exists for. The engine's own frozenRecomputes
+  // sentinel (one class comparison at freeze-miss time — see its
+  // constructor comment) counts cross-timeline evictions; with the rings
+  // split per timeline such an eviction is structurally impossible, so
+  // the assertion is EXACTLY 0.
+  //
+  // Scenario tuning (all deliberate): global tau 0.02/1.8 makes
+  // invLFree = invTau for slotJitter ≈ 1.0 — the fat middle of the
+  // 0.5+pcg jitter distribution — so many voices' free/captured
+  // generation counters advance at near-identical rates and stay
+  // residue-locked for seconds (the worst thrash case; a voice with
+  // slotJitter ≈ 0.556 does the same at the default tau). GAP_OBJ at
+  // r = 3.0 m keeps its captured voices hero-ELIGIBLE (bound ≈ 3.15 m at
+  // tau 0.02), heroCount 32 keeps a full hero set freezing both
+  // timelines, and the listener sways ±0.15 m at 0.4 Hz (VR head
+  // motion, r stays within eligibility) so any recompute lands on a
+  // genuinely different pose. Measured pre-fix (shared ring, this exact
+  // scenario): 19,094 cross-timeline evictions in 6 s. Post-fix: 0.
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  globalThis.currentTime = 0;
+  const proc = new Engine();
+  const sway = (q) => {
+    const t = (q * 128) / 48000;
+    return {
+      listener: [0.15 * Math.sin(2 * Math.PI * 0.4 * t), 1.7, 4.4],
+      listenerVel: [0.15 * 2 * Math.PI * 0.4 * Math.cos(2 * Math.PI * 0.4 * t), 0, 0],
+    };
+  };
+  const { L } = render(proc, 6.0, {
+    ...BASE_PARAMS, tau: 0.02 / 1.8, particleCount: 256, heroCount: 32,
+    transport: 1, objects: [GAP_OBJ],
+  }, sway);
+  for (let i = 0; i < L.length; i += 997) {
+    assert.ok(Number.isFinite(L[i]), `non-finite sample at ${i}`);
+  }
+  assert.equal(proc.frozenRecomputes, 0,
+    `cross-timeline ring thrash: ${proc.frozenRecomputes} frozen-geometry recomputes against a moved listener`);
+});
+
 test('the room glows and dies at the configured RT60', async () => {
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
   // strong scene for 1s, then silence (level 0) — measure tail decay.
