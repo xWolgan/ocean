@@ -586,6 +586,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // generation) instant (see freezeImageRadii), so one NaN-clean
     // staleness check covers all of them
     this.bedITag = new Float64Array(POOL * TRANSPORT_RING).fill(NaN);
+    // frozen per-generation wall-validity mask (fix round): bit w = ear L
+    // may hear wall w, bit w+6 = ear R. Validity is PART of the grain's
+    // frozen geometry, not a live read — see freezeImageRadii's
+    // foreign-clock note (a live read let a mid-generation listener
+    // plane-crossing flip a wall valid whose radii were never computed,
+    // reading rImg≈0 → a zero-delay, near-clamp-amplitude spurious blob).
+    this.bedIValid = new Uint16Array(POOL * TRANSPORT_RING);
     this.imgOut = new Float32Array(24); // freezeImageRadii out-scratch:
     // [wall*4 + {0:rL,1:rR,2:rdotL,3:rdotR}]
     // salience budget mask (Task 6): any current hero OR this hop's
@@ -1390,27 +1397,51 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  computed inline per wall (one sign flip) rather than cached, since
    *  it is cheaper than the position mirror it rides alongside.
    *
-   *  Writes 24 floats into `out`: out[w*4 + {0:rL,1:rR,2:rdotL,3:rdotR}]
-   *  for wall w = 0..5. No allocation. */
+   *  Wall VALIDITY is frozen here too (fix round — foreign-clock):
+   *  which walls an ear may hear (updateWallMirrors' wallValidL/R) is
+   *  read at the freeze instant, packed into bedIValid (bit w = ear L
+   *  hears wall w, bit w+6 = ear R), and returned; splatImageSplats
+   *  renders from the RETURNED frozen mask, never the live flags. A
+   *  live read would let a control-rate listener plane-crossing flip a
+   *  wall "valid" mid-generation whose radii this method (which skips
+   *  invalid walls' geometry, below) never computed — the revisit would
+   *  then read a stale/zeroed ring slot as rImg≈0: a zero-delay,
+   *  1/NEAR_CLAMP-amplitude spurious blob. Frozen validity is also the
+   *  physically right call, not just the safe one: an echo is part of
+   *  the grain's frozen propagation geometry — it must not appear (or
+   *  vanish) mid-flight any more than the grain's delay may bend.
+   *
+   *  Writes up to 24 floats into `out` (only walls with a set validity
+   *  bit are written — unwritten slots are stale and must not be read;
+   *  the caller's mask gate guarantees that): out[w*4 + {0:rL, 1:rR,
+   *  2:rdotL, 3:rdotR}] for wall w = 0..5. Returns the packed validity
+   *  mask. No allocation. */
   freezeImageRadii(k, g, tag, x, y, z, out) {
     const idx = k * TRANSPORT_RING + (((g % TRANSPORT_RING) + TRANSPORT_RING) % TRANSPORT_RING);
     if (this.bedITag[idx] === tag) {
+      const vm = this.bedIValid[idx];
       for (let w = 0; w < 6; w++) {
+        if ((vm & (0x41 << w)) === 0) continue; // neither ear: never written
         out[w * 4] = this.bedIRL[w][idx];
         out[w * 4 + 1] = this.bedIRR[w][idx];
         out[w * 4 + 2] = this.bedIRdotL[w][idx];
         out[w * 4 + 3] = this.bedIRdotR[w][idx];
       }
-      return;
+      return vm;
     }
     const lv = this.p.listenerVel;
     this.bedITag[idx] = tag;
+    let vm = 0;
     for (let w = 0; w < 6; w++) {
-      // Task 6 perf: a wall neither ear can validly hear from (see
-      // updateWallMirrors) is never read by splatImageSplats — skip its
-      // geometry too, not just its splat. Common case: the file's usual
-      // out-of-box listener invalidates exactly one wall.
-      if (!this.wallValidL[w] && !this.wallValidR[w]) continue;
+      // Task 6 perf: a wall neither ear can validly hear from AT THE
+      // FREEZE INSTANT is never rendered for this generation (frozen
+      // mask above) — skip its geometry too, not just its splat. Common
+      // case: the file's usual out-of-box listener invalidates exactly
+      // one wall.
+      const vL = this.wallValidL[w];
+      const vR = this.wallValidR[w];
+      if (!vL && !vR) continue;
+      vm |= (vL ? 1 << w : 0) | (vR ? 1 << (w + 6) : 0);
       const axis = w >> 1;
       const mvx = axis === 0 ? -lv[0] : lv[0];
       const mvy = axis === 1 ? -lv[1] : lv[1];
@@ -1428,6 +1459,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       out[w * 4] = rL; out[w * 4 + 1] = rR;
       out[w * 4 + 2] = rdotL; out[w * 4 + 3] = rdotR;
     }
+    this.bedIValid[idx] = vm;
+    return vm;
   }
 
   /** TRANSPORT (Task 4): air absorption gain exp(-AIR_COEF·f²·r), read
@@ -1559,6 +1592,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  6's throughput ledger: images cost ×6 splat calls per budgeted
    *  voice, so a higher floor there trims the quietest reflections
    *  before they reach the FFT/blob work below — see splatImageSplats).
+   *  Precisely: the check tests amp AFTER envelope/COLA/BED_CAL (and
+   *  the caller's REFL_COEF/1/r, folded into amp0) but BEFORE the
+   *  airGain and fc factors applied at the splat sites below — both
+   *  ≤ 1, so the check is permissive (under-skip only): nothing that
+   *  would have cleared the floor is ever wrongly dropped.
    *
    *  Returns true if anything was splatted (the caller's `sounding`).
    *  Block-rate; no allocation, no pow, no per-sample trig. */
@@ -1665,30 +1703,38 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  the `wantImages` guard next to its `bedG <= 0.001` skip.
    *
    *  Only called for BUDGETED voices (`imageMask` — any current hero OR
-   *  this hop's top-64 `scoreAmp`, computeImageBudget): the ×6 splats
-   *  multiply a voice's bed cost, so the salience gate is what keeps
-   *  this affordable (see the plan's throughput ledger).
+   *  this hop's top-IMAGE_TOP_K `scoreAmp`, computeImageBudget): the ×6
+   *  splats multiply a voice's bed cost, so the salience gate is what
+   *  keeps this affordable (see the plan's throughput ledger).
    *
    *  Per-wall amplitude: REFL_COEF × base / max(rImg, NEAR_CLAMP) — one
    *  reflection loses REFL_COEF of its energy at the wall, then spreads
    *  1/r from the (farther) image point same as any other source.
    *  Absorption and delay both use the TRUE rImg (via splatBurstArrival's
    *  rE/dE params); the skip is splatBurstArrival's own existing check,
-   *  applied AFTER every factor (envelope, COLA, BED_CAL, REFL_COEF,
-   *  1/r) — but at IMAGE_AMP_SKIP here, not the direct path's 2e-4 (see
-   *  splatBurstArrival's `ampSkip` param and IMAGE_AMP_SKIP's own
-   *  comment: measured to be needed both for throughput and because a
-   *  reflection's own Doppler/absorption geometry differs from the
-   *  direct path's, and a too-generous floor let quiet, differently-
-   *  shifted reflections measurably disturb narrowband tests like the
-   *  Doppler one that assume a single dominant tone).
+   *  applied after envelope/COLA/BED_CAL/REFL_COEF/1/r but BEFORE the
+   *  per-partial airGain and the fc wavetable-blend factor — both of
+   *  which are ≤ 1 (absorption only attenuates; fc blends peak-
+   *  normalized tables), so the check is PERMISSIVE: it may let through
+   *  a splat those last factors then push under the floor, but can
+   *  never wrongly drop one that would have cleared it — the same
+   *  under-skip-only bound the hero fast paths use. Here the floor is
+   *  IMAGE_AMP_SKIP, not the direct path's 2e-4 (see splatBurstArrival's
+   *  `ampSkip` param and IMAGE_AMP_SKIP's own comment: measured to be
+   *  needed both for throughput and because a reflection's own Doppler/
+   *  absorption geometry differs from the direct path's, and a too-
+   *  generous floor let quiet, differently-shifted reflections
+   *  measurably disturb narrowband tests like the Doppler one that
+   *  assume a single dominant tone).
    *
-   *  Each ear is gated independently by `wallValidL`/`wallValidR`
-   *  (updateWallMirrors): a wall whose plane the ear sits on the wrong
-   *  side of gets no splat for that ear at all, since the mirror formula
-   *  is only a real reflection when the ear is on the room's interior
-   *  side (see that method's doc comment for the measured pathology this
-   *  prevents).
+   *  Each ear is gated independently by the FROZEN per-generation
+   *  validity mask freezeImageRadii returns (bit w = ear L, bit w+6 =
+   *  ear R — frozen at the same instant as the radii; see that method's
+   *  foreign-clock note): a wall whose plane the ear sat on the wrong
+   *  side of at freeze time gets no splat for that ear this whole
+   *  generation, since the mirror formula is only a real reflection
+   *  when the ear is on the room's interior side (see updateWallMirrors
+   *  for the measured pathology this prevents).
    *
    *  `timelineTag` is the same slot discriminator freezeRadii's callers
    *  already pass (1 = free, asg+2 = captured); combined with `g` here
@@ -1699,10 +1745,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
   splatImageSplats(k, g, timelineTag, x, y, z, tHop, tEnd, bStart, bLen, anchor,
     freq, base, envO, sat, tableA, tableB, tf) {
     const out = this.imgOut;
-    this.freezeImageRadii(k, g, g * 16 + timelineTag, x, y, z, out);
+    const vm = this.freezeImageRadii(k, g, g * 16 + timelineTag, x, y, z, out);
     let sounding = false;
     for (let w = 0; w < 6; w++) {
-      if (this.wallValidL[w]) {
+      if (vm & (1 << w)) {
         const rL = out[w * 4];
         const dopL = 1 - out[w * 4 + 2] / SPEED_OF_SOUND;
         const sL = this.splatBurstArrival(
@@ -1713,7 +1759,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         );
         if (sL) sounding = true;
       }
-      if (this.wallValidR[w]) {
+      if (vm & (1 << (w + 6))) {
         const rR = out[w * 4 + 1];
         const dopR = 1 - out[w * 4 + 3] / SPEED_OF_SOUND;
         const sR = this.splatBurstArrival(

@@ -358,3 +358,28 @@ where.
   Suite 26/26 green (`tests/*.test.mjs` glob) in every run observed;
   `npx tsc --noEmit` and `node --check public/granular-legacy.js` clean;
   legacy file untouched.
+- Task 6 fix round (review): two Important + three minors. (1) Wall
+  VALIDITY now freezes with the grain: freezeImageRadii packs the
+  per-ear validity bits into a new `bedIValid` ring (same tag, same
+  freeze instant as the radii) and returns the mask; splatImageSplats
+  renders from the FROZEN mask, never the live wallValid flags — a live
+  read let a mid-generation listener plane-crossing flip a wall "valid"
+  whose radii were never computed, reading rImg≈0 (a zero-delay,
+  1/NEAR_CLAMP-amplitude spurious blob). Foreign-clock: an echo is part
+  of the grain's frozen propagation geometry — it must not appear or
+  vanish mid-flight. New deterministic guard test forces mid-generation
+  plane crossings; verified NON-VACUOUS against a simulated pre-fix
+  engine (fixed ratio 1.031 vs pre-fix 2.026, bound 1.5) after three
+  documented vacuous drafts (flip cadence must be co-prime with the
+  4-quanta hop cadence; the object must sit far from every wall so only
+  the spurious blob clears IMAGE_AMP_SKIP; sync=0 + low gain keeps the
+  limiter linear so injected energy is visible). (2) The suite's
+  throughput gate moves 4×→3× (ms < 1333) — the plan's own transport-on
+  budget (Global Constraints; Task 7 formalizes) pulled one task early,
+  with the comment citing the plan file; 4× was the pre-transport gate
+  and is load-fragile with images (measured 3.2-4.8× in-suite). Minors:
+  report's IMAGE_AMP_SKIP deviation value corrected 0.7→2.0; stale
+  top-64 → top-IMAGE_TOP_K in splatImageSplats' doc; ampSkip comments
+  now state precisely that the check runs before airGain/fc (both ≤1 —
+  permissive, under-skip only). Suite 27/27 green; tsc + legacy check
+  clean.
