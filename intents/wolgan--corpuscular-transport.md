@@ -100,3 +100,14 @@ where.
   0.0021). Suite 20 tests green. Throughput at 524k/48/tau0.004: per-ear
   heroes cost ~5% vs single-cursor (heroes are a small fraction of the
   mass), well above the 5.0× floor for Tasks 6/7.
+- Task 3 fix round (review): the per-sample render gate now bounds by
+  `emitAmp·(1/NEAR_CLAMP)` — the loudest a voice can render — so a near
+  hero (rE ≤ 0.25 m boosts up to 4×) can no longer be silently dropped by
+  its pre-distance amplitude; under-skip only, like the outer fast path.
+  New seam test quantifies the cross-generation tail truncation from the
+  engine's real envelope LUT: at the acceptance geometry (r 3.0, tau 0.02)
+  the dropped release energy is 0.26% per cycle, gated < 1%. Reported,
+  not gated: at dE ≥ tau (r ≥ 6.86 m at tau 0.02) the hero share of a
+  captured grain drops entirely (pure-hero render silent at the far
+  bounds corner while the bed is correct) — needs hero-side arrival
+  enumeration, flagged for Task 5/Stage 2. Suite 21 green.

@@ -369,6 +369,48 @@ test('heroes arrive when the bed arrives: crossfade stays coherent under transpo
   assert.ok(eD / eA < 0.006, `hero/bed decohered: residual ${(eD / eA).toFixed(4)}`);
 });
 
+test('cross-generation tail seam: truncated release energy is inaudible at the acceptance geometry', async () => {
+  // Task 3 advances each hero generation on the EMISSION clock; the part
+  // of a burst whose ARRIVAL crosses the next generation boundary is
+  // dropped (the per-ear age is computed against the freshly-refreshed
+  // generation, so aa < 0 there). The dropped duration is
+  // max(0, dE − gap) with gap = 0.4·tau (duty 0.6): the seam engages once
+  // flight time exceeds the burst's trailing silence — at tau = 0.02 that
+  // is r > 0.008·343 = 2.744 m, so the acceptance geometry (r ≈ 3.0 m)
+  // sits just INSIDE the seam regime; it triggers on every cycle, not as
+  // an edge case. This test quantifies the dropped energy from the
+  // engine's REAL baked envelope LUT (no duplicated envelope math):
+  // fraction = Σ env² over the truncated aa range / Σ env² over the full
+  // burst. Measured 0.26% — the release envelope is already near zero
+  // where the cut lands — pinned below 1%.
+  //
+  // NOTE (reported, not gated — see task-3-report.md "Fix round"): the
+  // seam law worsens with distance. At dE ≥ tau (r ≥ 6.86 m at tau 0.02)
+  // the hero share of a captured grain is dropped ENTIRELY (pure-hero
+  // render measured fully silent at the far bounds corner, r ≈ 8.2 m,
+  // while the bed renders correctly). That regime needs a design change
+  // (hero-side arrival enumeration), not a tolerance.
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  globalThis.currentTime = 0;
+  const proc = new Engine();
+  send(proc, 'params', { ...BASE_PARAMS, transport: 1, particleCount: 256, objects: [GAP_OBJ] });
+  proc.process([], [[new Float32Array(128), new Float32Array(128)]]); // bakes the env LUTs
+  const lut = (proc.objEnvLUT[0] || proc.envLUT).lut;
+  const dE = Math.hypot(3.0, 0.09) / 343; // flight time to either ear: 8.754 ms
+  const bLen = 0.6 * GAP_OBJ.tau; // 12 ms burst
+  const gap = 0.4 * GAP_OBJ.tau; // 8 ms trailing silence before the boundary
+  const trunc = Math.max(0, dE - gap); // 0.754 ms of release cut off per cycle
+  const aaCut = 1 - trunc / bLen;
+  let eTail = 0, eAll = 0;
+  for (let i = 0; i < lut.length; i++) {
+    const e = lut[i] * lut[i];
+    eAll += e;
+    if (i / lut.length >= aaCut) eTail += e;
+  }
+  const frac = eTail / eAll;
+  assert.ok(frac < 0.01, `truncated tail carries ${(100 * frac).toFixed(2)}% of the burst energy`);
+});
+
 function xcorrPeak(a, b, maxLag) {
   // normalized cross-correlation peak of a vs b over lags -maxLag..maxLag
   let ea = 0, eb = 0;

@@ -1671,7 +1671,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             tAarr = this.wheel[v.freeTableA]; tBarr = this.wheel[v.freeTableB];
             lutC = envLUT;
           }
-          if (emitAmp > 0.0002) {
+          // gate on the LOUDEST the voice can render, emitAmp·invNear
+          // (the 1/max(rE,·) factor is ≤ 1/NEAR_CLAMP = 4): emitAmp alone
+          // is the pre-distance emission loudness, and gating on it would
+          // silently drop a near voice whose rendered amplitude
+          // emitAmp·iE is up to 4× larger — the same under-skip-only
+          // bound the outer fast path uses.
+          if (emitAmp * invNear > 0.0002) {
             const hg = this.heroGain[k];
             // ear L: envelope age from tL = t − dL (aa<0 → not yet arrived,
             // silent, natural), carrier at tL against the shared anchor
