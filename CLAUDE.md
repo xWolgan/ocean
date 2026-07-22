@@ -37,6 +37,19 @@ slot-anchored phases — so the duplicated-math duty above STILL APPLIES
 in full to `granular-processor.js`. Do not weaken that warning because
 Stage 2 is planned; it isn't built.
 
+The corpuscular-transport constants (`docs/superpowers/specs/2026-07-19-corpuscular-transport-design.md`)
+join this duty: `SPEED_OF_SOUND` (343), `EAR_OFFSET` (0.09), `NEAR_CLAMP`
+(0.25, amplitude-only — delays use true r), `REFL_COEF` (0.7), `RT60`
+(0.4), `AIR_COEF` (2.2e-10 nepers·m⁻¹·Hz⁻² — corrected during
+implementation from a plan value 4 orders of magnitude too strong; see
+`SPEC.md` §7.2), wall geometry, `IMAGE_TOP_K`/`IMAGE_AMP_SKIP`, and the
+FDN's delay lengths/mix. These live audio-only today, but per §3 of that
+spec they transplant line-for-line into the Stage-2 GPU splat shader
+when its readback gate opens — every term is per-particle, state-free,
+closed-form math for exactly that reason. Keep them identical wherever
+both sides eventually touch them, the same as the free/object hash
+salts above.
+
 ## The foreign-clock principle
 
 No clock that isn't part of the universe may touch the substance:
@@ -46,6 +59,18 @@ No clock that isn't part of the universe may touch the substance:
 - The visual frame is an EXPOSURE (integrate/stratify over dt), never a
   sample, for anything coherent/synchronized.
 - The app clock offset in the worklet slews (hard resync only >50ms).
+- Corpuscular-transport quantities (a grain's per-ear distance, flight
+  delay, range rate/Doppler multiplier, and wall-reflection validity)
+  are FROZEN per (voice, generation, ear) at first consideration, the
+  same way a grain's phase is — a control-rate change (listener motion,
+  a `transport` toggle) affects only the NEXT generation, never bends
+  one already in flight. This is a real, load-bearing constraint, not a
+  formality: driving `transport` from something other than its intended
+  one-time, page-load resolution (e.g. writing the flag directly at
+  runtime instead of navigating with `?transport=off`) visibly produces
+  a messy mid-flight transition for a cycle or two while old and new
+  enumeration rules overlap — confirmed empirically while building the
+  live flash-to-ring probe (`probes/audio_stage1.py`).
 Violations of this principle have caused every audio artifact so far.
 
 ## Other hard-won constraints

@@ -116,6 +116,16 @@ therefore also the pitch axis: 100 ms = 10 Hz pulse, 1 ms = 1 kHz tone.
   The universe is pure tones; noise is their disorder (Fourier: white
   noise = all sines at random phase). `speed` is visual-only ("unbound"
   folder, default 0) until it earns an audible twin.
+
+  **Corpuscular transport** (per
+  `docs/superpowers/specs/2026-07-19-corpuscular-transport-design.md`):
+  space is drawn in time, not just loudness — every grain arrives at
+  each ear r/343 s late (≈3 ms per meter), carrying true 1/r spreading,
+  air absorption, Doppler, and first-order echoes off the room's own
+  walls into a shared reverberant tail. The flash says now; the ring
+  says where. `?transport=off` reverts to the flat, instantaneous
+  Stage-1 spatialization for A/B listening. Full term list, constants,
+  and boundaries: `SPEC.md` §7.2.
 - `src/audio/AudioEngine.ts` — control-rate bridge (~60 Hz): sliders,
   listener pose, attractor state, and the clock offset that maps the audio
   clock onto the app clock. No audio data crosses it.

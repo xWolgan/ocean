@@ -28,6 +28,22 @@ OCEAN runs entirely in your web browser. There is nothing to install.
    fix for the silence you had before, and it's also the path toward it
    running on the Quest headset. Your local 64-voice patch is no longer
    needed once this is merged — don't worry about keeping it around.
+
+   One more change, and it's a big one: **distance is audible now.**
+   Sound used to arrive instantly no matter how far away something was —
+   only quieter. Now it actually takes time to travel, the way it does
+   in real life: something far away flashes now and you hear it ring a
+   little later (about 3 milliseconds per meter — for something 10
+   meters away, that's a 30ms delay, small but real, and it's WHY things
+   now feel like they're really out there in the room instead of just
+   "quiet"). Your two ears also hear slightly different things depending
+   on where a sound is, which is a big part of how real hearing
+   locates things in space. And the room itself answers back: sounds
+   bounce off the walls and fade out naturally, like a real space with
+   an echo, instead of the old silent void. If you ever want to compare
+   to the old, flat-sounding version — for example to describe a
+   difference to Wolgan — add `?transport=off` to the end of the link
+   (right after the address, before pressing Enter) and reload.
 4. Play:
    - **W / A / S / D** — move through the space, **Q / E** — down / up,
      hold **Shift** to move faster, **right-drag** the mouse to look around.
@@ -70,6 +86,23 @@ OCEAN działa w całości w przeglądarce. Niczego nie trzeba instalować.
    też droga do działania na goglach Quest. Twoja lokalna łatka na 64
    głosy nie jest już potrzebna po scaleniu tej zmiany — możesz się nią
    nie przejmować.
+
+   Jest jeszcze jedna zmiana, i to spora: **teraz słychać odległość.**
+   Wcześniej dźwięk docierał od razu, niezależnie od tego, jak coś było
+   daleko — robił się tylko cichszy. Teraz naprawdę potrzebuje czasu, żeby
+   dolecieć, tak jak w prawdziwym świecie: coś odległego błyska TERAZ, a
+   dźwięk słychać chwilę PÓŹNIEJ (mniej więcej 3 milisekundy na każdy
+   metr — coś oddalonego o 10 metrów spóźni się o 30ms; niewiele, ale
+   naprawdę, i właśnie DLATEGO rzeczy zaczynają brzmieć, jakby realnie
+   były gdzieś w przestrzeni, a nie tylko "ciszej"). Dwoje uszu słyszy
+   też odrobinę co innego, zależnie od tego, skąd dźwięk dochodzi — to
+   spora część tego, jak prawdziwy słuch namierza rzeczy w przestrzeni.
+   No i sama przestrzeń teraz odpowiada: dźwięki odbijają się od ścian i
+   naturalnie wybrzmiewają, jak w prawdziwym pomieszczeniu z echem,
+   zamiast dawnej ciszy dookoła. Jeśli kiedyś zechcesz porównać ze starą,
+   płaską wersją brzmienia — na przykład żeby opisać różnicę Wolganowi —
+   dopisz `?transport=off` na końcu linku (zaraz po adresie, przed
+   naciśnięciem Enter) i odśwież stronę.
 4. Graj:
    - **W / A / S / D** — poruszanie się, **Q / E** — dół / góra,
      **Shift** — szybciej, **prawy przycisk myszy + ruch** — rozglądanie.

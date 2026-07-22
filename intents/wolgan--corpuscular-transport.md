@@ -458,3 +458,85 @@ where.
   `node --check public/granular-legacy.js` clean; legacy file untouched;
   IMAGE_TOP_K left at 16 (unchanged — that dial belongs to a listening
   session, per the brief, not a test).
+- Task 8 landed (final task) — docs truth pass, PERF numbers, and the
+  live proof. `probes/audio_stage1.py` gained `measure_flash_to_ring()`:
+  places a captured, fully-synced point object at r = 3.0 m, flips the
+  running engine's own `transportFlag` mid-recording (three alternating
+  rounds; median reported) and reads the flash-to-ring gap directly off
+  each capture's own burst spacing via a real `AnalyserNode`. Chose the
+  mid-session flip over two separate `?transport=off` navigations
+  because cross-navigation JS/AudioContext-startup jitter is comparable
+  in size to the ~8.75 ms signal itself; the flip has its own cost
+  though (documented empirically, and now in CLAUDE.md's foreign-clock
+  section): an instantaneous flag write crosses hop-enumeration
+  boundaries the engine was never designed to be flipped at, so the 1-2
+  cycles straddling the flip render under a mix of ON/OFF rules and do
+  NOT cleanly show a single r/343-shorter gap. Fixed by comparing the
+  averaged MODULAR PHASE of the steady region well before the flip
+  against the steady region well after it (2.5 cycles' clearance each
+  side), which is insensitive to the transition's own messiness, plus
+  taking the median of three flip rounds to average out the live
+  engine's real cycle-to-cycle capture/release jitter (which the
+  offline suite never has to contend with, being fully deterministic).
+  Five consecutive live runs on Wolgan's desktop: median flash-to-ring
+  8.09, 8.02, 8.18, 10.12, 6.73 ms, all within the probe's ±3 ms
+  tolerance of the predicted 8.75 ms. `PERF.md` gained the transport-on
+  throughput rows (3.6–3.8× in-suite / 8.1–8.2× isolated at 524k,
+  matching the Task 7 ledger) plus the live numbers and the bed's
+  audibility-horizon note (DMAX arithmetic ≈133 ms ≈ 45 m — beyond it
+  the bed is silent by enumeration, not by any audibility law; harmless
+  given the 6×3×6 m box). `SPEC.md` gained §7.2 (every transport term,
+  every constant, the `?transport=off` guarantee, hero eligibility, the
+  sub-Schroeder claim verbatim from the brief) plus a §9 boundary
+  paragraph. `README.md`'s architecture section gained the transport
+  paragraph (space drawn in time, 3 ms/m, the walls answer,
+  `?transport=off` for A/B). `CLAUDE.md`: the transport constants
+  (including the corrected `AIR_COEF`) joined the duplicated-math duty
+  with their Stage-2 transplant note, and the foreign-clock section
+  gained the frozen-per-generation transport-quantities rule, illustrated
+  by the very probe-development finding above (flipping the flag outside
+  its intended one-time resolution visibly produces a mid-flight
+  transition artifact — the principle is not a formality).
+  `FOR_CO-CREATOR.md` gained an EN + natural-Polish paragraph: distance
+  is now audible, ITD, the room answers, `?transport=off` as the
+  "compare to the old flat sound" switch. Full verification:
+  `npx tsc --noEmit` clean, `node --test "tests/*.test.mjs"` 28/28,
+  `node --check public/granular-legacy.js` clean, live probe PROBE PASS
+  including the new flash-to-ring check.
+
+## Final state (branch complete)
+
+All 8 plan tasks landed. Phenomena verified end to end (offline suite +
+live probe): flash-to-ring gap, ITD, per-ear interference/combs, true
+1/r, air absorption (with the corrected `AIR_COEF`), Doppler (heroes
+exact, bed block-rate), first-order image-source echoes with frozen
+wall validity, Sabine-matched FDN tail decay. Key deviations from the
+plan, all measured and documented rather than assumed: `AIR_COEF`
+corrected from a plan bug (2.8e-6 → 2.2e-10, ~4 orders of magnitude);
+hero eligibility added as a new mechanism (far voices bed-only, by
+design, not omission) to close a far-field silent-hero hole; the bed's
+audibility horizon widened from ~71 ms/24 m to ~133 ms/45 m by the
+image-source DMAX rise, still harmless in-box; the throughput gate
+re-derived and tightened twice (4×→3×) as images and the FDN landed,
+settling at 3.6–3.8× in-suite (8.1–8.2× isolated) against the 3× floor.
+`?transport=off` preserves Stage-1 bit-exactly throughout — the frozen
+legacy null test never moved.
+
+What remains, explicitly out of THIS branch's scope (post-plan, per
+the plan file and design spec §5.6):
+- A listening session to decide `IMAGE_TOP_K`/`IMAGE_AMP_SKIP` as
+  artistic dials (currently 16 / 0.1, measurement-tuned for throughput
+  and correctness, not for taste).
+- The sub-Schroeder modal floor (~50 analytic box-mode resonators) —
+  gated on listening, per spec §2.4; today the engine honestly claims
+  only geometric propagation below ≈120 Hz.
+- Ambisonic/HRTF binaural decode (spec §2.5) — ITD + 1/r + absorption
+  carry most of localization today; ILD/pinna cues are a later,
+  separate increment.
+- Stage 2 (GPU splat pass) remains unchanged and still gated on the
+  Quest/WebGPU readback measurements in `PERF.md` — this branch's
+  transport terms are written to transplant into that shader line for
+  line whenever that gate opens, but the gate itself is untouched here.
+- PR opened (`Corpuscular transport: the ear gets a lens`), NOT merged
+  — human review + the same Quest/WebGPU measurements requested for the
+  spectral-tile-audio branch are the remaining gate before merge.
