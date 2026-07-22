@@ -968,25 +968,39 @@ test('wall validity freezes with the grain: mid-generation plane crossings stay 
   //       consecutive hops see opposite plane sides, so ~960-sample
   //       generations (~2 hops each at tau=0.02) freeze on one side and
   //       revisit from the other, in both directions.
-  //   (b) Object position: NEAR the z wall (echo audible) the spurious
-  //       blob hides inside a legitimate loud echo; centerZ=0 puts the
-  //       object ≥3 m from every wall, so every LEGIT image
-  //       (0.7·base/3.5 ≈ 0.2·base post-envelope) falls under
-  //       IMAGE_AMP_SKIP and is skipped — the fixed engine renders NO
-  //       images at all here, while the pre-fix zero-delay blob
-  //       (0.7·base/NEAR_CLAMP = 2.8·base) still clears the floor.
+  //   (b) Object position AND gain: NEAR the z wall (echo audible) the
+  //       spurious blob hides inside a legitimate loud echo; centerZ=0
+  //       keeps every legit image PATH ≥3.05 m, so a legit image's
+  //       post-envelope amplitude (0.7·base/3.05 ≈ 0.23·base) sits a
+  //       fixed ×12 under the blob's (0.7·base/NEAR_CLAMP = 2.8·base),
+  //       and the OBJECT GAIN is chosen so the legit side of that
+  //       separation falls UNDER IMAGE_AMP_SKIP while the blob still
+  //       clears it — the fixed engine then renders NO images here and
+  //       only the blob can inject energy. RE-SCENED at the final
+  //       review, after Task 7 relaxed IMAGE_AMP_SKIP 2.0 → 0.1: at the
+  //       original gain 20 legit images started clearing the 0.1 floor
+  //       too (measured with the same simulated pre-fix method as
+  //       below: fixed ratio drifted to 0.986 and pre-fix thinned to
+  //       1.679 — the 1.5 bound still split them, but with this
+  //       comment's premise no longer true and only 0.18 of pre-fix
+  //       margin left). A gain sweep {20, 5, 2, 1, 0.5} shows the
+  //       ratios stabilize at gain ≤1 (fixed 1.014 / pre-fix 1.884,
+  //       identical at 1 and 0.5 — the all-legit-images-sub-floor
+  //       regime); gain 0.5 is chosen for its extra ×2 margin against
+  //       any future floor relaxation.
   //   (c) Levels: sync=1's 256-voice COHERENT sum drives the master
   //       limiter into full gain-riding, which normalizes the blob away
   //       (measured ratio 1.035, indistinguishable). sync=0 (incoherent,
   //       √N sum) + gain 0.01 keeps the mix in the limiter's linear
   //       range where injected energy is visible.
-  // Measured with these choices: fixed engine ratio 1.031, simulated
-  // pre-fix 2.026 — the 1.5 bound splits them with margin on both sides
-  // (renders are deterministic).
+  // Measured with these choices at IMAGE_AMP_SKIP = 0.1: fixed engine
+  // ratio 1.014, simulated pre-fix 1.884 — the 1.5 bound splits them
+  // with real margin on both sides (renders are deterministic; the
+  // original skip-2.0 scene measured 1.031 / 2.026).
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
   const obj = {
-    ...GAP_OBJ, centerX: 0, centerY: 1.5, centerZ: 0, reach: 1e6, gain: 20, sync: 0,
-  }; // centered: far from every wall (see (b) above)
+    ...GAP_OBJ, centerX: 0, centerY: 1.5, centerZ: 0, reach: 1e6, gain: 0.5, sync: 0,
+  }; // centered + quiet: every legit image sub-floor (see (b) above)
   const base = {
     ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1, density: 0,
     objects: [obj], listener: [0, 1.5, 2.95], gain: 0.01,
