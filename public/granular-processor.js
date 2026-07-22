@@ -52,6 +52,18 @@ const NEAR_CLAMP = 0.25; // m, amplitude-only floor (1/max(r, NEAR_CLAMP)); prop
 const REFL_COEF = 0.7; // image-source wall reflection coefficient (Task 6)
 const RT60 = 0.4; // s, Sabine tail decay target (Task 7's FDN)
 const AIR_COEF = 2.8e-6; // air absorption: alpha(f) = AIR_COEF * f^2, gain = exp(-alpha * r) (~ -1 dB at 4 kHz over 7 m)
+// Air-absorption LUT shape (Task 4): frequency buckets reuse the
+// GRAIN_BUCKETS PATTERN (round-log2-and-clamp) rather than the duration
+// array itself — a fresh, finer axis, because carrier frequency is a
+// continuum (hueToFreq + harmonics), not five fixed sizes. ¼-octave
+// buckets are plenty: absorption only needs to shape a whole critical
+// band's worth of energy together, and the LUT's OTHER axis (r) gets real
+// linear interpolation because r is what audibly moves from hop to hop.
+const AIR_F_BUCKETS_PER_OCT = 4;
+const AIR_F_MIN = 20; // Hz, floor of the bucket range (below the keyboard's lowest note, 55 Hz)
+const AIR_R_STEPS = 16; // log-spaced r steps, linearly interpolated at lookup
+const AIR_R_MIN = NEAR_CLAMP; // 0.25 m — same floor as the amplitude clamp
+const AIR_R_MAX = 12; // m — covers the box diagonal + first-order image paths (see DMAX's comment)
 const DMAX = 0.03; // s, max direct-path flight time the bed enumerates for
 // (≈10.3 m at c=343 — beyond the box diagonal from any in-box listener;
 // Task 6 raises this to 0.09 to cover first-order image paths)
@@ -385,6 +397,34 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.bedRTag = new Float64Array(POOL * TRANSPORT_RING).fill(NaN);
     this.bedREar = [0, 0]; // freezeRadii out-scratch [rL, rR]
 
+    // air absorption (Task 4): exp(-AIR_COEF*f²*r) baked into a 2D
+    // [fBucket x rStep] LUT here at construction — Math.exp/Math.pow never
+    // run at hop rate, only here, once. See airGain() for the lookup (¼-
+    // octave nearest bucket on f, linear interpolation on r).
+    // airFLog2Min is the bucket-index ANCHOR, so it must itself be an
+    // integer (rounded, same as every per-call bucket index) — AIR_F_MIN
+    // isn't a power of 2 like GRAIN_BUCKETS' base, so its raw log2 is
+    // fractional; leaving it unrounded would make every fi below a
+    // non-integer LUT offset (a silent NaN from the Float32Array read).
+    this.airFLog2Min = Math.round(Math.log2(AIR_F_MIN) * AIR_F_BUCKETS_PER_OCT);
+    this.airFBuckets = Math.round(Math.log2((sampleRate * 0.5) / AIR_F_MIN) * AIR_F_BUCKETS_PER_OCT) + 1;
+    this.airRLogRatio = Math.log(AIR_R_MAX / AIR_R_MIN);
+    this.airGainLUT = new Float32Array(this.airFBuckets * AIR_R_STEPS);
+    for (let fi = 0; fi < this.airFBuckets; fi++) {
+      const f = 2 ** ((fi + this.airFLog2Min) / AIR_F_BUCKETS_PER_OCT);
+      for (let ri = 0; ri < AIR_R_STEPS; ri++) {
+        const r = AIR_R_MIN * (AIR_R_MAX / AIR_R_MIN) ** (ri / (AIR_R_STEPS - 1));
+        this.airGainLUT[fi * AIR_R_STEPS + ri] = Math.exp(-AIR_COEF * f * f * r);
+      }
+    }
+    // per-voice, per-ear one-pole lowpass state for the hero approximation
+    // of the same law (Task 4) — allocation-free, persists across blocks
+    // like the master limiter/HP state below; reset at promotion (see the
+    // PROMOTION CONTINUITY block in process()) so a voice's filter memory
+    // never leaks from a previous, unrelated hero stint.
+    this.heroLpL = new Float32Array(POOL);
+    this.heroLpR = new Float32Array(POOL);
+
     this.port.onmessage = (e) => {
       if (e.data.type === 'params') {
         Object.assign(this.p, e.data.data);
@@ -667,13 +707,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             const base = s.capAmp0 * wCap * bedG;
             const sL = this.splatBurstArrival(
               this.bedReL, this.bedImL, tHop, tEnd, bStart, bLen,
-              rr[0] / SPEED_OF_SOUND, anchor, s.capFreq,
+              rr[0] / SPEED_OF_SOUND, rr[0], anchor, s.capFreq,
               base / Math.max(rr[0], NEAR_CLAMP),
               envO, s.capSat, s.capTableA, s.capTableB, s.capTableFrac,
             );
             const sR = this.splatBurstArrival(
               this.bedReR, this.bedImR, tHop, tEnd, bStart, bLen,
-              rr[1] / SPEED_OF_SOUND, anchor, s.capFreq,
+              rr[1] / SPEED_OF_SOUND, rr[1], anchor, s.capFreq,
               base / Math.max(rr[1], NEAR_CLAMP),
               envO, s.capSat, s.capTableA, s.capTableB, s.capTableFrac,
             );
@@ -802,13 +842,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           const base = s.amp0 * wFree * bedG;
           const sL = this.splatBurstArrival(
             this.bedReL, this.bedImL, tHop, tEnd, bStart, bLen,
-            rr[0] / SPEED_OF_SOUND, anchor, s.freeFreq,
+            rr[0] / SPEED_OF_SOUND, rr[0], anchor, s.freeFreq,
             base / Math.max(rr[0], NEAR_CLAMP),
             this.envLUT, s.freeSat, s.freeTableA, s.freeTableB, s.freeTableFrac,
           );
           const sR = this.splatBurstArrival(
             this.bedReR, this.bedImR, tHop, tEnd, bStart, bLen,
-            rr[1] / SPEED_OF_SOUND, anchor, s.freeFreq,
+            rr[1] / SPEED_OF_SOUND, rr[1], anchor, s.freeFreq,
             base / Math.max(rr[1], NEAR_CLAMP),
             this.envLUT, s.freeSat, s.freeTableA, s.freeTableB, s.freeTableFrac,
           );
@@ -995,6 +1035,32 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     out[1] = rR;
   }
 
+  /** TRANSPORT (Task 4): air absorption gain exp(-AIR_COEF·f²·r), read
+   *  from the 2D LUT baked in the constructor — no Math.exp/Math.pow
+   *  here, ever. Frequency: nearest ¼-octave bucket (round-log2-and-
+   *  clamp — the SAME bucketing PATTERN as GRAIN_BUCKETS' duration
+   *  index, reused for a different axis). r: linearly interpolated
+   *  between the two bracketing log-spaced LUT steps, since r is what
+   *  actually moves audibly hop to hop; a bucket seam in f sits inside
+   *  one critical band and is not a resolution a listener has.
+   *  Math.log/Math.log2 below run at BLOCK rate (once per bed grain or
+   *  once per hero voice per audio quantum) — the same cost class as
+   *  the existing `Math.round(Math.log2(bLen*sampleRate))` grain-
+   *  duration bucketing already in this file, not the banned per-hop
+   *  Math.pow/Math.exp. */
+  airGain(freq, r) {
+    let fi = Math.round(Math.log2(Math.max(freq, AIR_F_MIN)) * AIR_F_BUCKETS_PER_OCT) - this.airFLog2Min;
+    if (fi < 0) fi = 0;
+    else if (fi >= this.airFBuckets) fi = this.airFBuckets - 1;
+    const rc = r < AIR_R_MIN ? AIR_R_MIN : (r > AIR_R_MAX ? AIR_R_MAX : r);
+    const rt = (Math.log(rc / AIR_R_MIN) / this.airRLogRatio) * (AIR_R_STEPS - 1);
+    let ri = rt | 0;
+    if (ri >= AIR_R_STEPS - 1) ri = AIR_R_STEPS - 2;
+    const frac = rt - ri;
+    const base = fi * AIR_R_STEPS + ri;
+    return this.airGainLUT[base] * (1 - frac) + this.airGainLUT[base + 1] * frac;
+  }
+
   /** TRANSPORT: may this voice be a hero right now? 1 if the hero
    *  renderer would be FAITHFUL to it, 0 if it must stay in the bed.
    *
@@ -1063,9 +1129,16 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
    *  calibration terms — the SAME ones the transport-off path applies
    *  (envSegRMS, √2, √overlap, GRAIN_COLA, BED_CAL, duration-bucketed
    *  grain kernels), so one BED_CAL keeps calibrating both modes.
+   *
+   *  Air absorption (Task 4) rides along here too: the fundamental and
+   *  EACH partial gets its own `airGain(hFreq, rE)` lookup (a LUT read,
+   *  not Math.exp) — a grain's spectrum doesn't dim as one block, its
+   *  highs die faster than its lows, exactly like the emitted anchor
+   *  above translates the WHOLE spectrum rigidly by dE while absorption
+   *  shapes each partial's amplitude independently.
    *  Returns true if anything was splatted (the caller's `sounding`).
    *  Block-rate; no allocation, no pow, no per-sample trig. */
-  splatBurstArrival(re, im, tHop, tEnd, bStart, bLen, dE, anchor, freq, amp0,
+  splatBurstArrival(re, im, tHop, tEnd, bStart, bLen, dE, rE, anchor, freq, amp0,
     envO, sat, tableA, tableB, tf) {
     const blockT = BLOCK / sampleRate;
     const bStartE = bStart + dE; // the arrival window is the emission
@@ -1117,7 +1190,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const invPA = this.wheelInvPeak[tableA];
     const invPB = this.wheelInvPeak[tableB];
     const fc = (1 - sat) + sat * ((1 - tf) * invPA + tf * invPB);
-    splatBlob(re, im, BLOCK, bin, amp * fc, ph, gker, shift);
+    const airFund = this.airGain(freq, rE);
+    splatBlob(re, im, BLOCK, bin, amp * fc * airFund, ph, gker, shift);
     if (sat > 0.01) {
       for (let side = 0; side < 2; side++) {
         const rec = RECIPES[side === 0 ? tableA : tableB];
@@ -1129,9 +1203,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           const pa = amp * w * ha;
           if (pa <= 0.000002) continue;
           // partial h rides the SAME displaced anchor: the whole
-          // spectrum of the grain arrives together
+          // spectrum of the grain arrives together, but each partial's
+          // OWN frequency (freq·hh) gets its own absorption lookup —
+          // highs really do die faster than lows within one grain
           const php = (2 * Math.PI * freq * hh * (tHop - anchorE) - Math.PI / 2) % (2 * Math.PI);
-          splatBlob(re, im, BLOCK, fb, pa, php, gker, shift);
+          splatBlob(re, im, BLOCK, fb, pa * this.airGain(freq * hh, rE), php, gker, shift);
         }
       }
     }
@@ -1627,6 +1703,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           const aO = Math.ceil(cycStartH * sampleRate) / sampleRate;
           v.capPhase = ((((t - aO) * v.capFreq) % 1) + 1) % 1 * TABLE_SIZE;
         }
+        // Task 4: a fresh promotion gets a fresh absorption filter — old
+        // memory from a previous, unrelated hero stint must not leak in
+        this.heroLpL[k] = 0;
+        this.heroLpR[k] = 0;
       }
 
       if ((v.capOn ? v.capAmp : v.amp) > 0.0002) activeHeroes++;
@@ -1692,6 +1772,30 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
           caO = Math.ceil(((v.asgGen - v.asgPhi) / v.asgInvTau) * sampleRate) / sampleRate;
         }
+        // Task 4: per-ear one-pole approximating air absorption at this
+        // voice's OWN carrier. Heroes render one wavetable-blended
+        // waveform (fundamental + harmonics pre-summed), not separate
+        // partials like the bed's per-partial LUT splat, so this is an
+        // honest single-point match rather than the bed's exact one:
+        // solve the one-pole's coefficient so its magnitude AT THE
+        // CARRIER equals airGain(freq, rE) — treat the one-pole as a
+        // continuous-time RC lowpass |H(f)| = wc/sqrt(wc²+f²), solve its
+        // cutoff wc from the target gain G at f=freq (wc = f·G/sqrt(1−G²)),
+        // then map to a digital coefficient the same way the constructor's
+        // limRelease/hpR one-poles do (a = exp(−2π·wc/sampleRate)).
+        // Approximation, stated honestly: harmonics ride the SAME filter
+        // as the fundamental (the bed alone gets each partial's own
+        // absorption right); rE and freq are read once here, at block
+        // start (not re-solved on a mid-block generation change) — a
+        // ~2.7 ms quantum is far shorter than any audible distance change,
+        // so this is "set per block" exactly as the plan specifies.
+        const heroFreq0 = v.capOn ? v.capFreq : v.freeFreq;
+        const gL0 = Math.max(1e-4, Math.min(0.999999, this.airGain(heroFreq0, rr2[0])));
+        const gR0 = Math.max(1e-4, Math.min(0.999999, this.airGain(heroFreq0, rr2[1])));
+        const wcL = (heroFreq0 * gL0) / Math.sqrt(Math.max(1e-12, 1 - gL0 * gL0));
+        const wcR = (heroFreq0 * gR0) / Math.sqrt(Math.max(1e-12, 1 - gR0 * gR0));
+        const aHL = Math.exp((-2 * Math.PI * wcL) / sampleRate);
+        const aHR = Math.exp((-2 * Math.PI * wcR) / sampleRate);
         for (let s = 0; s < n; s++) {
           const xF = t * invLFree + v.phi;
           const gFn = Math.floor(xF);
@@ -1756,6 +1860,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             const aaL = captured
               ? (tL * v.asgInvTau + v.asgPhi - v.asgGen) / 0.6
               : (tL * invLFree + v.phi - v.gen - v.offN) / v.durN;
+            let xL = 0;
             if (aaL > 0 && aaL < 1) {
               const env = lutC.lut[(aaL * ENV_LUT_SIZE) | 0];
               if (env > 0.0001) {
@@ -1763,14 +1868,21 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
                 if (ph < 0) ph += 1;
                 const idx = (ph * TABLE_SIZE) & TABLE_MASK;
                 const osc = sine[idx] * (1 - sat) + (tAarr[idx] * (1 - tf) + tBarr[idx] * tf) * sat;
-                outL[s] += osc * env * emitAmp * iL * hg;
+                xL = osc * env * emitAmp * iL * hg;
               }
             }
+            // Task 4: the one-pole is stepped EVERY sample this voice is
+            // active (even when xL is 0) so its memory decays honestly
+            // through silence instead of freezing and leaking into a
+            // later, unrelated grain.
+            this.heroLpL[k] = (1 - aHL) * xL + aHL * this.heroLpL[k];
+            outL[s] += this.heroLpL[k];
             // ear R
             const tR = t - dR;
             const aaR = captured
               ? (tR * v.asgInvTau + v.asgPhi - v.asgGen) / 0.6
               : (tR * invLFree + v.phi - v.gen - v.offN) / v.durN;
+            let xR = 0;
             if (aaR > 0 && aaR < 1) {
               const env = lutC.lut[(aaR * ENV_LUT_SIZE) | 0];
               if (env > 0.0001) {
@@ -1778,9 +1890,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
                 if (ph < 0) ph += 1;
                 const idx = (ph * TABLE_SIZE) & TABLE_MASK;
                 const osc = sine[idx] * (1 - sat) + (tAarr[idx] * (1 - tf) + tBarr[idx] * tf) * sat;
-                outR[s] += osc * env * emitAmp * iR * hg;
+                xR = osc * env * emitAmp * iR * hg;
               }
             }
+            this.heroLpR[k] = (1 - aHR) * xR + aHR * this.heroLpR[k];
+            outR[s] += this.heroLpR[k];
           }
           const hg0 = this.heroGain[k];
           this.heroGain[k] = hg0 < gTarget

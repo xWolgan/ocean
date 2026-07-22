@@ -130,3 +130,56 @@ where.
   0.00189 unchanged). New regression test: the far-corner object
   (r 8.2 m, heroCount 256) must stay audible and near-identical to the
   bed-only render (pre-fix it was fully silent). Suite 22 green.
+- Review freebie: the hero/bed coherence test's residual (Task 3) gained
+  a FLOOR assertion (`eD/eA > 1e-5`) alongside its existing ceiling — a
+  silently-vacated hero mask would give exactly 0 residual (two
+  renderers, different algorithms, so real agreement is never bit-exact),
+  and that would previously have passed the ceiling check silently. Fails
+  loudly instead.
+- Task 4 landed — the air takes its toll. `exp(-AIR_COEF·f²·rE)` is baked
+  into a 2D `[fBucket × rStep]` Float32Array LUT at construction (no
+  Math.exp/Math.pow at hop rate, ever): frequency buckets reuse the
+  GRAIN_BUCKETS round-log2-and-clamp PATTERN at ¼-octave resolution (a
+  fresh axis — carrier frequency is a continuum, not five fixed sizes);
+  r is 16 log-spaced steps from NEAR_CLAMP to 12 m, linearly interpolated.
+  Bed: `splatBurstArrival` multiplies the fundamental AND every partial by
+  its OWN `airGain(freq·h, rE)` — a grain's spectrum dims unevenly, not as
+  one block, exactly like the arrival-time translation is rigid while
+  absorption is per-frequency. Heroes: since a hero voice renders ONE
+  wavetable-blended waveform (no separate partials to filter), a per-ear
+  one-pole lowpass approximates the SAME law at just the voice's carrier
+  — solved each block from the frozen rE (continuous-time RC model,
+  wc = f·G/√(1−G²), then `a = exp(−2π·wc/sampleRate)`, the same style as
+  the existing limRelease/hpR coefficients) and reset to 0 at promotion so
+  no stale filter memory crosses a hero's absence.
+  Fix round: the frequency-bucket anchor (`airFLog2Min`) must itself be an
+  integer bucket index — `AIR_F_MIN=20` isn't a power of 2 like
+  GRAIN_BUCKETS' base, so its raw `log2` is fractional, and leaving it
+  unrounded made every lookup's array offset fractional too (a silent NaN
+  from the Float32Array read, caught by the FULL suite going from 18/18 to
+  4/18 the moment absorption touched every bed splat).
+  Test-design finding (documented in the test itself): the brief's own
+  sketch (violet ~3.5 kHz tint, 300/3000 Hz probes, r 1→7 m) is NOT usable
+  with this AIR_COEF — verified empirically before picking numbers, not
+  assumed. `alpha(f) = AIR_COEF·f²` is so steep at kHz carriers that
+  `airGain(7040, r=1)` (the violet object's OWN 2nd harmonic) already
+  underflows a Float32Array to an exact 0, and a quarter-octave LUT bucket
+  near 3.5 kHz spans ~600 Hz — wider than the brief's own 300 Hz
+  sideband gap — so no probe pair up there shows a real, LUT-attributable
+  tilt (either identical-bucket, no signal, or pure noise). The test uses
+  a lower-register tint instead (green, hue solved exactly for a 300 Hz
+  fundamental) and compares that fundamental against its REAL 2nd harmonic
+  (600 Hz, present via the wavetable's own harmonic recipe) at r 1→7 m —
+  the SAME geometry the flash-to-ring/ITD tests use. Measured tilt tracked
+  the pure-math expected value within 3.0 dB (LUT quantization — ¼-octave
+  buckets + 16-step log-r LINEAR interpolation of the gain itself, not its
+  log); the test's tolerance is ±4 dB, wide enough to absorb that
+  quantization honestly without hiding a wrong law (a sign error or a
+  missing factor of 2 would miss by tens of dB). Transport-off path
+  untouched (splatBurstArrival and the hero one-pole only run inside
+  `if (transport)` branches); the null test vs legacy stays the regression
+  floor. Suite 23/23 green (`tests/*.test.mjs` glob); `npx tsc --noEmit`
+  and `node --check public/granular-legacy.js` clean. Throughput at 524k/
+  48/tau0.004 with absorption active: 4.2–5.5× realtime across repeated
+  runs (system-load-dependent), comfortably above the ≥3× global floor and
+  the suite's own ≥4× gate.

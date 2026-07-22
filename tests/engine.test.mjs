@@ -367,6 +367,8 @@ test('heroes arrive when the bed arrives: crossfade stays coherent under transpo
   let eD = 0, eA = 0;
   for (let i = 0; i < bedOnly.length; i++) { const d = mixed[i] - bedOnly[i]; eD += d * d; eA += bedOnly[i] * bedOnly[i]; }
   assert.ok(eD / eA < 0.006, `hero/bed decohered: residual ${(eD / eA).toFixed(4)}`);
+  // floor: a silently-vacated hero mask would give exactly 0 (two renderers, different algorithms) — this fails loudly instead
+  assert.ok(eD / eA > 1e-5, `hero/bed residual suspiciously exact: ${(eD / eA).toExponential(2)}`);
 });
 
 test('cross-generation tail seam: truncated release energy is inaudible at the acceptance geometry', async () => {
@@ -445,6 +447,89 @@ test('far voices belong to the bed: eligibility keeps a distant object audible u
   let eD = 0, eA = 0;
   for (let i = 0; i < bedOnly.length; i++) { const d = withHeroes[i] - bedOnly[i]; eD += d * d; eA += bedOnly[i] * bedOnly[i]; }
   assert.ok(eD / eA < 0.006, `far-object handoff leaks: residual ${(eD / eA).toFixed(4)}`);
+});
+
+test('air absorption: distance dulls the highs by the configured law', async () => {
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  // goertzel band-energy probe, same form as the OLA-bed test's `power` helper
+  const bandE = (buf, f) => {
+    let re = 0, im = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const a = (2 * Math.PI * f * i) / 48000;
+      re += buf[i] * Math.cos(a);
+      im += buf[i] * Math.sin(a);
+    }
+    return (re * re + im * im) / buf.length;
+  };
+  // Scene choice, verified empirically (not assumed) before picking numbers:
+  // the brief's own sketch (tint (0.9,0.2,0.9) => hue clamps to the violet
+  // end => hueToFreq gives 3520 Hz, probed at 300/3000 Hz over r=1..7 m) is
+  // NOT usable with this AIR_COEF. alpha(f) = AIR_COEF*f^2 is so steep at
+  // kHz carriers that gain = exp(-alpha*f^2*r) underflows a Float32Array to
+  // EXACTLY 0 well inside r=7 m — verified directly: airGain(3520, r) is
+  // already ~5e-14 at r=1 m and airGain(7040, r) (the object's own 2nd
+  // harmonic) is already an exact 0 at r=1 m, before r even varies. Any
+  // "high" probe at that register is therefore either bucketed identically
+  // to a nearby "low" probe (no tilt: a quarter-octave LUT bucket is ~600 Hz
+  // wide up there) or reads pure underflow/FFT noise, not signal — neither
+  // proves the law. A lower-register carrier keeps the WHOLE comparison
+  // inside the LUT's well-conditioned range while still demonstrating
+  // "distance dulls the highs" (a real fundamental vs its real 2nd
+  // harmonic, both genuinely present via the wavetable's harmonic recipe).
+  //
+  // tint (0, 1, 0.0314) is a fully-saturated green: rgbToHsv gives hue
+  // 0.33857 exactly, and hueToFreq(0.33857) = 55*2^(6*0.33857/0.83) = 300 Hz
+  // (solved for exactly, not guessed — see the algebra: hue = (log2(300/55)
+  // /6)*0.83). scaleBlend 0.4 (GAP_OBJ default) blends wavetables 2
+  // ("organ": harmonics 1,2,4,8) and 3 ("bell": 1,7,11,13) — h=2 (600 Hz,
+  // real energy, organ recipe weight 0.7) is our "high" probe; h=1 (300 Hz,
+  // the fundamental) is our "low" probe. Both bands are therefore GENUINE
+  // synthesized content, not spectral leakage.
+  //
+  // colorRandom: BASE_PARAMS.colorRandom is 0.5, but GAP_OBJ's crW=1/crV=0
+  // (and srW=1/srV=0) force crEff/srEff to 0 for every captured voice
+  // regardless (see refreshFreeGeneration/evaluateCapture's crEff formula:
+  // colorRandom + (crV-colorRandom)*crW = colorRandom*(1-crW) = 0 when
+  // crW=1) — so every voice gets this exact tint, hue, and carrier; no
+  // extra override needed, noted here so the reason isn't rediscovered.
+  const GREEN = { ...GAP_OBJ, tintR: 0, tintG: 1, tintB: 0.0314 };
+  const mk = (z) => ({ ...GREEN, centerZ: z });
+  const rNear = 1.0, rFar = 7.0; // z = 3.4 / z = -2.6, the SAME geometry
+  // the flash-to-ring/ITD tests use for r=1/r=7 (listener z=4.4)
+  globalThis.currentTime = 0;
+  const near = render(new Engine(), 3.0, { ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1, objects: [mk(4.4 - rNear)] }).L.slice(48000);
+  globalThis.currentTime = 0;
+  const far = render(new Engine(), 3.0, { ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1, objects: [mk(4.4 - rFar)] }).L.slice(48000);
+  const fLo = 300, fHi = 600; // fundamental and its real 2nd harmonic
+  // compare high/low spectral tilt, corrected for 1/r (flat in f, cancels
+  // inside each render's own hi/lo ratio):
+  const tiltNear = bandE(near, fHi) / bandE(near, fLo);
+  const tiltFar = bandE(far, fHi) / bandE(far, fLo);
+  const measured = 10 * Math.log10(tiltFar / tiltNear);
+  // Derivation, from first principles (AIR_COEF alone, not the brief's
+  // sketch): the per-blob gain is an AMPLITUDE multiplier,
+  //   A(f,r) = exp(-AIR_COEF * f^2 * r).
+  // bandE is a power (energy) measure (re^2+im^2, same convention as every
+  // other dB comparison in this file, e.g. bandEnergies' 10*log10 ratios),
+  // so the POWER gain is A(f,r)^2 = exp(-2*AIR_COEF*f^2*r) — this is the
+  // "factor of 2 between amplitude and energy dB" the task calls out.
+  // Within one render, 1/r and every f-independent factor (envelope,
+  // COLA, kernel, BED_CAL) are identical for fLo and fHi, so the tilt
+  //   tilt(r) = bandE(hi,r)/bandE(lo,r) = exp(-2*AIR_COEF*(fHi^2-fLo^2)*r) * S
+  // where S is the (r-independent) ratio of the two partials' own emitted
+  // amplitudes. Comparing tilt across two renders cancels S exactly:
+  //   measured = 10*log10(tiltFar/tiltNear)
+  //            = -2*AIR_COEF*(fHi^2-fLo^2)*(rFar-rNear) * 10*log10(e)
+  const AIR_COEF = 2.8e-6;
+  const expected = -2 * AIR_COEF * (fHi ** 2 - fLo ** 2) * (rFar - rNear) * 10 * Math.log10(Math.E);
+  // Tolerance wider than the brief's ±3 dB sketch: the LUT is a deliberate
+  // approximation (¼-octave frequency buckets, 16 log-spaced r steps with
+  // LINEAR interpolation of the gain itself, not its log) — measured
+  // empirically at 3.0 dB off the pure-math value for exactly this r/f
+  // pair before this test was written; ±4 dB gives honest margin without
+  // hiding a wrong law (a sign error or a missing factor would miss by
+  // tens of dB, not 4).
+  assert.ok(Math.abs(measured - expected) < 4, `tilt ${measured.toFixed(1)} dB vs expected ${expected.toFixed(1)} dB`);
 });
 
 function xcorrPeak(a, b, maxLag) {
