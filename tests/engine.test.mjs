@@ -449,7 +449,60 @@ test('far voices belong to the bed: eligibility keeps a distant object audible u
   assert.ok(eD / eA < 0.006, `far-object handoff leaks: residual ${(eD / eA).toFixed(4)}`);
 });
 
-test('air absorption: distance dulls the highs by the configured law', async () => {
+// The air-absorption acceptance is split in two, because the physical
+// effect is deliberately subtle (~0.5 dB across the box at kHz carriers —
+// physical honesty, not a special effect) and therefore sits BELOW the
+// tolerances any render-level band comparison in this file can hold:
+//   1. the LUT-law test below is the PRECISE gate — it checks the baked
+//      table against exp(-AIR_COEF·f²·r) directly, where nothing masks it;
+//   2. the render test after it is a deliberately LOOSE sign/monotonicity
+//      check — it only proves the LUT is actually WIRED into the splat
+//      path (per partial, per ear, from the frozen rE), not the law's
+//      magnitude, which the LUT test already owns.
+test('air absorption LUT: the baked table IS exp(-AIR_COEF·f²·r), to interpolation tolerance', async () => {
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  globalThis.currentTime = 0;
+  const proc = new Engine();
+  // Pinned on purpose: this is a physics constant, not a tuning dial —
+  // 2.2e-10 nepers·m⁻¹·Hz⁻² gives 0.031 dB/m at 4 kHz and 0.19 dB/m at
+  // 10 kHz (ISO 9613 order of magnitude, f² small-room approximation).
+  // If the engine's AIR_COEF ever changes, this test failing is the
+  // conscious-decision checkpoint, exactly like the flash-to-ring test
+  // pins SPEED_OF_SOUND = 343 through its expected lag.
+  // (Corrected during Task 4: the plan's original 2.8e-6 was ~4 orders
+  // too strong — it silenced every kHz carrier within meters.)
+  const AIR_COEF = 2.2e-10;
+  // Frequency samples sit at EXACT ¼-octave bucket centers (f = 2^(i/4)):
+  // the f axis is deliberately quantized to nearest-bucket (a design
+  // choice — a ¼-octave seam is below what a listener resolves), so the
+  // law lives in the r axis and its linear interpolation. Testing at
+  // bucket centers isolates exactly that: any failure here is a real
+  // law/interpolation bug, not the known, intended f-quantization.
+  // i = 24..56 spans 64 Hz .. 16.4 kHz — the engine's full audible
+  // content range (hueToFreq caps carriers at 3520·pitchMul, recipes
+  // reach ×8 before the Nyquist-margin break in splatBurstArrival).
+  // r samples are deliberately OFF the 16 log-spaced LUT steps so the
+  // linear interpolation between bracketing steps is what's measured.
+  for (let i = 24; i <= 56; i++) {
+    const f = 2 ** (i / 4);
+    for (const r of [0.31, 0.7, 1.37, 2.6, 4.1, 6.3, 8.9, 11.4]) {
+      const lut = proc.airGain(f, r);
+      const exact = Math.exp(-AIR_COEF * f * f * r);
+      const relErr = Math.abs(lut / exact - 1);
+      // ≤1%: measured worst case over this grid is ~0.3% (the linear
+      // interpolation of a gently-curved exp with tiny exponents —
+      // alpha·r ≤ 0.6 nepers at 16 kHz/11.4 m); 1% holds that without
+      // ever passing a wrong constant (4 orders off means the LUT would
+      // read ~0 or ~1 where exact says otherwise — relErr near 1, not 0.01)
+      assert.ok(relErr < 0.01, `airGain(${f.toFixed(0)}, ${r}) = ${lut} vs exact ${exact} (relErr ${(relErr * 100).toFixed(2)}%)`);
+    }
+  }
+  // and the r clamp edges stay finite and lawful
+  assert.ok(Math.abs(proc.airGain(4000, 0.25) / Math.exp(-AIR_COEF * 4000 * 4000 * 0.25) - 1) < 0.01, 'r floor');
+  assert.ok(Math.abs(proc.airGain(4000, 12) / Math.exp(-AIR_COEF * 4000 * 4000 * 12) - 1) < 0.01, 'r ceiling');
+});
+
+test('air absorption wiring: distance tilts the rendered spectrum down, never up', async () => {
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
   // goertzel band-energy probe, same form as the OLA-bed test's `power` helper
   const bandE = (buf, f) => {
@@ -461,75 +514,44 @@ test('air absorption: distance dulls the highs by the configured law', async () 
     }
     return (re * re + im * im) / buf.length;
   };
-  // Scene choice, verified empirically (not assumed) before picking numbers:
-  // the brief's own sketch (tint (0.9,0.2,0.9) => hue clamps to the violet
-  // end => hueToFreq gives 3520 Hz, probed at 300/3000 Hz over r=1..7 m) is
-  // NOT usable with this AIR_COEF. alpha(f) = AIR_COEF*f^2 is so steep at
-  // kHz carriers that gain = exp(-alpha*f^2*r) underflows a Float32Array to
-  // EXACTLY 0 well inside r=7 m — verified directly: airGain(3520, r) is
-  // already ~5e-14 at r=1 m and airGain(7040, r) (the object's own 2nd
-  // harmonic) is already an exact 0 at r=1 m, before r even varies. Any
-  // "high" probe at that register is therefore either bucketed identically
-  // to a nearby "low" probe (no tilt: a quarter-octave LUT bucket is ~600 Hz
-  // wide up there) or reads pure underflow/FFT noise, not signal — neither
-  // proves the law. A lower-register carrier keeps the WHOLE comparison
-  // inside the LUT's well-conditioned range while still demonstrating
-  // "distance dulls the highs" (a real fundamental vs its real 2nd
-  // harmonic, both genuinely present via the wavetable's harmonic recipe).
-  //
-  // tint (0, 1, 0.0314) is a fully-saturated green: rgbToHsv gives hue
-  // 0.33857 exactly, and hueToFreq(0.33857) = 55*2^(6*0.33857/0.83) = 300 Hz
-  // (solved for exactly, not guessed — see the algebra: hue = (log2(300/55)
-  // /6)*0.83). scaleBlend 0.4 (GAP_OBJ default) blends wavetables 2
-  // ("organ": harmonics 1,2,4,8) and 3 ("bell": 1,7,11,13) — h=2 (600 Hz,
-  // real energy, organ recipe weight 0.7) is our "high" probe; h=1 (300 Hz,
-  // the fundamental) is our "low" probe. Both bands are therefore GENUINE
-  // synthesized content, not spectral leakage.
-  //
-  // colorRandom: BASE_PARAMS.colorRandom is 0.5, but GAP_OBJ's crW=1/crV=0
-  // (and srW=1/srV=0) force crEff/srEff to 0 for every captured voice
-  // regardless (see refreshFreeGeneration/evaluateCapture's crEff formula:
-  // colorRandom + (crV-colorRandom)*crW = colorRandom*(1-crW) = 0 when
-  // crW=1) — so every voice gets this exact tint, hue, and carrier; no
-  // extra override needed, noted here so the reason isn't rediscovered.
-  const GREEN = { ...GAP_OBJ, tintR: 0, tintG: 1, tintB: 0.0314 };
-  const mk = (z) => ({ ...GREEN, centerZ: z });
-  const rNear = 1.0, rFar = 7.0; // z = 3.4 / z = -2.6, the SAME geometry
-  // the flash-to-ring/ITD tests use for r=1/r=7 (listener z=4.4)
+  // The brief's violet scene, usable now that AIR_COEF is physical: tint
+  // (0.9, 0.2, 0.9) is magenta, whose hue clamps to the violet end of
+  // hueToFreq → carrier exactly 3520 Hz. colorRandom 0.5 in BASE_PARAMS
+  // is a no-op here because GAP_OBJ's crW=1/crV=0 force crEff to 0 for
+  // every captured voice (crEff = colorRandom·(1−crW) = 0), so every
+  // voice carries this exact hue — no spread to account for. Probes sit
+  // on REAL content: the 3520 Hz fundamental vs its own ×4 partial at
+  // 14080 Hz (organ recipe [1,2,4,8], weight 0.5 — scaleBlend 0.4 puts
+  // the wavetable wheel at organ/bell, organ-dominant), maximizing
+  // Δ(f²) so the subtle law shows above render artifacts.
+  const VIOLET = { ...GAP_OBJ, tintR: 0.9, tintG: 0.2, tintB: 0.9 };
+  const mk = (z) => ({ ...VIOLET, centerZ: z });
+  const rNear = 1.0, rFar = 7.0; // z = 3.4 / z = -2.6 — the same
+  // geometry the flash-to-ring/ITD tests use (listener z = 4.4)
   globalThis.currentTime = 0;
   const near = render(new Engine(), 3.0, { ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1, objects: [mk(4.4 - rNear)] }).L.slice(48000);
   globalThis.currentTime = 0;
   const far = render(new Engine(), 3.0, { ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1, objects: [mk(4.4 - rFar)] }).L.slice(48000);
-  const fLo = 300, fHi = 600; // fundamental and its real 2nd harmonic
-  // compare high/low spectral tilt, corrected for 1/r (flat in f, cancels
-  // inside each render's own hi/lo ratio):
-  const tiltNear = bandE(near, fHi) / bandE(near, fLo);
-  const tiltFar = bandE(far, fHi) / bandE(far, fLo);
-  const measured = 10 * Math.log10(tiltFar / tiltNear);
-  // Derivation, from first principles (AIR_COEF alone, not the brief's
-  // sketch): the per-blob gain is an AMPLITUDE multiplier,
-  //   A(f,r) = exp(-AIR_COEF * f^2 * r).
-  // bandE is a power (energy) measure (re^2+im^2, same convention as every
-  // other dB comparison in this file, e.g. bandEnergies' 10*log10 ratios),
-  // so the POWER gain is A(f,r)^2 = exp(-2*AIR_COEF*f^2*r) — this is the
-  // "factor of 2 between amplitude and energy dB" the task calls out.
-  // Within one render, 1/r and every f-independent factor (envelope,
-  // COLA, kernel, BED_CAL) are identical for fLo and fHi, so the tilt
-  //   tilt(r) = bandE(hi,r)/bandE(lo,r) = exp(-2*AIR_COEF*(fHi^2-fLo^2)*r) * S
-  // where S is the (r-independent) ratio of the two partials' own emitted
-  // amplitudes. Comparing tilt across two renders cancels S exactly:
-  //   measured = 10*log10(tiltFar/tiltNear)
-  //            = -2*AIR_COEF*(fHi^2-fLo^2)*(rFar-rNear) * 10*log10(e)
-  const AIR_COEF = 2.8e-6;
-  const expected = -2 * AIR_COEF * (fHi ** 2 - fLo ** 2) * (rFar - rNear) * 10 * Math.log10(Math.E);
-  // Tolerance wider than the brief's ±3 dB sketch: the LUT is a deliberate
-  // approximation (¼-octave frequency buckets, 16 log-spaced r steps with
-  // LINEAR interpolation of the gain itself, not its log) — measured
-  // empirically at 3.0 dB off the pure-math value for exactly this r/f
-  // pair before this test was written; ±4 dB gives honest margin without
-  // hiding a wrong law (a sign error or a missing factor would miss by
-  // tens of dB, not 4).
-  assert.ok(Math.abs(measured - expected) < 4, `tilt ${measured.toFixed(1)} dB vs expected ${expected.toFixed(1)} dB`);
+  const fLo = 3520, fHi = 14080;
+  // high/low tilt within each render cancels 1/r (flat in f) and every
+  // f-independent term; comparing tilts across renders cancels the two
+  // partials' emitted-amplitude ratio. What remains is the POWER gain
+  // ratio (bandE is re²+im² — energy, hence the factor 2 on amplitude):
+  //   expected = -2·AIR_COEF·(fHi²−fLo²)·(rFar−rNear)·10·log10(e)
+  //            = -2·2.2e-10·1.859e8·6·4.343 ≈ -2.1 dB
+  const measured = 10 * Math.log10((bandE(far, fHi) / bandE(far, fLo)) / (bandE(near, fHi) / bandE(near, fLo)));
+  // WHY loose (sign/monotonicity only, not magnitude): the honest
+  // physical effect is ~2 dB here even with Δ(f²) maximized — the same
+  // order as render-level band differences between two different
+  // geometries (different arrival windows, kernel bucket edges, per-ear
+  // interference). The LUT-law test above is the precise gate for the
+  // law itself; this test only asserts the multiply is actually in the
+  // splat path with the right SIGN — distance may only dull the highs.
+  assert.ok(measured < 0, `far tilt did not dull the highs: ${measured.toFixed(2)} dB (must be < 0)`);
+  // and a law-scale sanity floor: the pre-correction AIR_COEF (2.8e-6,
+  // 4 orders too strong) measured tens-of-dB collapses/underflow noise
+  // here — a regression to an unphysical constant fails this, loudly
+  assert.ok(measured > -12, `far tilt collapsed beyond any physical law: ${measured.toFixed(2)} dB`);
 });
 
 function xcorrPeak(a, b, maxLag) {

@@ -183,3 +183,37 @@ where.
   48/tau0.004 with absorption active: 4.2–5.5× realtime across repeated
   runs (system-load-dependent), comfortably above the ≥3× global floor and
   the suite's own ≥4× gate.
+- Task 4 fix round (review): the test-design finding above was the tip of
+  a real bug — in the PLAN's constant, not the implementation. AIR_COEF
+  2.8e-6 was ~4 orders of magnitude too strong: physical air absorption
+  is ~0.03 dB/m at 4 kHz (ISO 9613 order, f² small-room approximation),
+  and the plan's own parenthetical ("≈ −1 dB at 4 kHz over 7 m") implies
+  ~1e-9. The first-landing test had routed AROUND the wrongness (moving
+  probes to 300/600 Hz where the broken law didn't underflow) instead of
+  questioning the constant — the underflows-at-1-meter observation WAS
+  the evidence. Corrected to `AIR_COEF = 2.2e-10` nepers·m⁻¹·Hz⁻²
+  (0.031 dB/m at 4 kHz, 0.19 dB/m at 10 kHz; derivation comment at the
+  constant; plan's Global Constraints line updated and marked corrected).
+  The acceptance is now split honestly in two, because the physical
+  effect (~0.2 dB at 4 kHz across the box) is deliberately subtle —
+  below any render-level band tolerance in the suite: (1) a PRECISE
+  LUT-law unit test — airGain(f, r) vs exp(−AIR_COEF·f²·r) over a grid of
+  33 ¼-octave bucket-center frequencies (64 Hz–16.4 kHz; bucket centers
+  isolate the r-interpolation from the intended f-quantization) × 8
+  off-step radii, ≤1% relative (measured worst 0.194% at 16.4 kHz/6.3 m);
+  the AIR_COEF value is pinned in-test as a conscious-decision checkpoint,
+  like flash-to-ring pins SPEED_OF_SOUND. (2) a LOOSE render-level
+  sign/monotonicity check proving the LUT is wired into the splat path:
+  the brief's violet scene (magenta tint → 3520 Hz carrier, usable now
+  that the constant is physical), fundamental vs its real ×4 organ
+  partial at 14080 Hz, r 1→7 m — asserts only tilt < 0 (distance may
+  only dull the highs) plus a law-scale floor (> −12 dB; the broken
+  constant measured tens-of-dB collapses here). Measured −1.75 dB vs
+  pure-law −2.13 dB — decisively non-trivial, right sign, right order.
+  LUT shape unchanged (same buckets/steps; at the corrected magnitudes
+  the interpolation is even better-conditioned). Hero one-pole derivation
+  is generic in G and survives unchanged — re-derived and commented at
+  the physical constant: G within ~2.5% of 1 across the box, cutoffs at
+  or above Nyquist, an extremely mild fraction-of-a-dB tilt (that
+  mildness is the point). Suite 24/24 green; tsc + legacy check clean;
+  throughput ~4.5× realtime.

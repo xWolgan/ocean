@@ -51,7 +51,18 @@ const EAR_OFFSET = 0.09; // m, half the interaural distance (earL/earR straddle 
 const NEAR_CLAMP = 0.25; // m, amplitude-only floor (1/max(r, NEAR_CLAMP)); propagation DELAYS always use the true r
 const REFL_COEF = 0.7; // image-source wall reflection coefficient (Task 6)
 const RT60 = 0.4; // s, Sabine tail decay target (Task 7's FDN)
-const AIR_COEF = 2.8e-6; // air absorption: alpha(f) = AIR_COEF * f^2, gain = exp(-alpha * r) (~ -1 dB at 4 kHz over 7 m)
+// Air absorption: alpha(f) = AIR_COEF * f^2 (nepers·m⁻¹·Hz⁻²), amplitude
+// gain = exp(-alpha(f) * r). AIR_COEF = 2.2e-10 gives alpha(4kHz) =
+// 2.2e-10·1.6e7 = 3.52e-3 Np/m = 0.031 dB/m (×8.686 dB/Np) and 0.19 dB/m
+// at 10 kHz — the ISO 9613 order of magnitude for mid-humidity air under
+// the f² small-room approximation. Over our box's ≤9 m paths the effect
+// is deliberately subtle (~0.3 dB at 4 kHz across the room): physical
+// honesty, not a special effect.
+// (Corrected during Task 4: the plan's original 2.8e-6 was ~4 orders of
+// magnitude too strong — its own parenthetical "≈ −1 dB at 4 kHz over
+// 7 m" implies ~1e-9, and 2.8e-6 silenced every kHz carrier within
+// meters, gutting the instrument's highs.)
+const AIR_COEF = 2.2e-10;
 // Air-absorption LUT shape (Task 4): frequency buckets reuse the
 // GRAIN_BUCKETS PATTERN (round-log2-and-clamp) rather than the duration
 // array itself — a fresh, finer axis, because carrier frequency is a
@@ -1783,6 +1794,16 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         // cutoff wc from the target gain G at f=freq (wc = f·G/sqrt(1−G²)),
         // then map to a digital coefficient the same way the constructor's
         // limRelease/hpR one-poles do (a = exp(−2π·wc/sampleRate)).
+        // The derivation is generic in G, so it survives the AIR_COEF
+        // correction unchanged — re-derived and checked at the physical
+        // constant: G stays within ~2.5% of 1 across the whole box (e.g.
+        // G = 0.9919 at 3.5 kHz / r = 3 m → wc ≈ 27 kHz, a ≈ 0.028;
+        // G = 0.9757 at r = 9 m → wc ≈ 16 kHz, a ≈ 0.13), so the pole is
+        // EXTREMELY mild — a fraction-of-a-dB tilt whose cutoff sits at
+        // or above Nyquist. Up there the analog-RC→exp map is crude, but
+        // the filter it yields is nearly transparent with the correct
+        // gain at the carrier, which is the whole contract. That mildness
+        // is the point: physical honesty, not a special effect.
         // Approximation, stated honestly: harmonics ride the SAME filter
         // as the fundamental (the bed alone gets each partial's own
         // absorption right); rE and freq are read once here, at block
