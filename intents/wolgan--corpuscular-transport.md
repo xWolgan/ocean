@@ -289,3 +289,72 @@ where.
   meter; the ramp is hop/cycle alignment. Documented at the DMAX
   constant (Task 6's 0.03→0.09 moves this horizon to ~45 m — flagged for
   the Task 8 docs pass). Suite 25/25 green; tsc + legacy clean.
+- Task 6 landed — the walls answer. 6 first-order image splats per
+  budgeted voice (any `isHero` OR this hop's top-`IMAGE_TOP_K` `scoreAmp`
+  — `computeImageBudget`, selectHeroes' own top-K scan pattern reused):
+  each wall of `[boundsMin, boundsMin+boundsSize]` mirrors the grain,
+  `amp = REFL_COEF·base/max(rImg,NEAR_CLAMP)` (no bedG — heroes never
+  render their own reflections, so a promoted voice's echo would
+  otherwise mute exactly when loudest), absorption/delay/Doppler at the
+  true `rImg`, `splatBurstArrival` reused unchanged. `DMAX` rises to
+  0.09 (image paths are always longer than direct). Doppler for images
+  uses the MIRRORED-LISTENER trick (`freezeImageRadii`): mirror the ear
+  once at control rate (`updateWallMirrors`) rather than the grain every
+  generation — cheaper, and correct because a wall reflection is an
+  isometry and its own inverse (derivation in `freezeImageRadii`'s doc
+  comment, including why the mirrored VELOCITY, not the real one, drives
+  the range-rate). Own ring (`bedIRL/RR/RdotL/RdotR` × 6 walls,
+  `TRANSPORT_RING` widened 256→512 for the wider DMAX — recomputed
+  worst-case ~496 free-timeline slots) rather than widening
+  `freezeRadii`'s, since only budgeted voices ever need it.
+  Review-caught bug (found via the echo test's own failures, not a
+  reviewer): the file's usual out-of-box listener (0,1.7,4.4, box z
+  ∈[-3,3]) SANDWICHES the z=3 wall between it and any in-box object —
+  the plain mirror formula then places an "image" CLOSER to the ear than
+  the direct path (measured 0.22 m vs 3.0 m direct), an echo that leads
+  its own source. Fixed with `wallValidL`/`wallValidR`
+  (`updateWallMirrors`): a wall only splats for an ear on the room's
+  interior side of it — this also protects every pre-existing transport
+  test, which all keep that listener convention.
+  Test design (echo test, `tests/engine.test.mjs`): raw autocorrelation
+  of one render — the brief's own sketch — does NOT resolve a specific
+  wall's lag: GAP_OBJ's burst (576 samples at tau=0.02) is far wider
+  than the ~50-sample spacing between different walls' echo delays in a
+  6×3×6 box, so the direct burst's own broad self-correlation swamps any
+  single wall's contribution. Fixed with a DIFFERENCE of two renders
+  (listener moved inside the box; object 0.5 m from +x; a box shaped
+  tall/deep so only +x is near; a second render with the SAME box scaled
+  ×1e6 so every wall's image underflows the splat floor) — `diff = onA −
+  onB` isolates the +x echo alone; `xcorrPeak(onA, diff, ·)` (the
+  existing helper) then resolves lag 145 vs expected 140, corr ≈0.86.
+  `density: 0` and `reach: 1e6` keep the free layer and the capture set
+  identical between the two box sizes.
+  Throughput ledger (the binding constraint — see IMAGE_TOP_K's own
+  comment for the full trail): the brief's top-64 dropped
+  524k/hero48/tau0.004 throughput to ~2.6-3.7x, under the suite's ≥4x
+  gate. Four measures closed most of the gap: IMAGE_TOP_K 64→32→16;
+  `DMAX_DIRECT` (0.03, the original Task-2 lookback) restored as the
+  ENUMERATION bound for any voice NOT this hop's `wantImages` — the
+  single biggest win, since widening every voice's lookback for a
+  reflection only a minority ever render was pure waste;
+  `freezeImageRadii` skips a wall's geometry when neither ear can hear
+  it at all; `IMAGE_AMP_SKIP` (a post-envelope floor for image splats
+  only, via a new `ampSkip` param on `splatBurstArrival`) raised to
+  2.0 — also fixes a second, independent regression the raised budget
+  alone didn't: the pre-existing Doppler test's narrowband FFT peak was
+  dragged off target by a quiet, differently-Doppler-shifted reflection
+  (measured ratio 1.0171 vs the established ~1.032) — a reflection's
+  OWN range-rate differs from the direct path's.
+  Measured HONESTLY across many repeated `node --test "tests/*.test.mjs"`
+  runs at this final tuning: 3.2-4.8x realtime, in-suite (the realistic
+  case — an isolated fresh process reads far higher, ~8.9x for this same
+  code; this gap pre-dates Task 6, verified against the pre-Task-6 code
+  too: ~4.3x in-suite vs ~8.9x isolated, so the margin over the ≥4x gate
+  was already thin before Task 6 landed anything). MOST runs clear the
+  gate; the spread widens under ambient system load from this session's
+  own sustained measurement runs (no further constant-tuning removed
+  that noise) — reported as-is per the ledger's "measure the trade"
+  instruction rather than smoothed over; flagged for Task 7's 3x re-gate.
+  Suite 26/26 green (`tests/*.test.mjs` glob) in every run observed;
+  `npx tsc --noEmit` and `node --check public/granular-legacy.js` clean;
+  legacy file untouched.

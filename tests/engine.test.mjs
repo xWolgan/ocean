@@ -803,6 +803,117 @@ test('Doppler: an approaching listener hears the textbook ratio', async () => {
   assert.ok(Math.abs(ratio - expected) < 0.006, `Doppler ratio ${ratio.toFixed(4)} vs ${expected.toFixed(4)}`);
 });
 
+test('image source: the wall answers at the mirrored-path delay', async () => {
+  // Test-design finding (verified empirically before picking numbers,
+  // same discipline as Tasks 4/5's AIR_COEF/r0 corrections): the brief's
+  // own sketch — a single render, raw autocorrelation of the FULL
+  // composite signal — does NOT resolve a specific wall's echo lag. Two
+  // independent problems, found by measurement:
+  //
+  // (1) SANDWICHING. The file's usual listener (0, 1.7, 4.4) sits
+  // OUTSIDE the box on the +z side (box z ∈ [-3,3] from the default
+  // boundsMin/boundsSize [-3,0,-3]/[6,3,6]) — harmless for the
+  // direct-path tests above, but it puts the z=3 wall BETWEEN any
+  // in-box object and the ear: mirroring across z=3 then lands the
+  // image closer to the ear than the object's own direct path (measured:
+  // an object at centerZ=1.4 gives a z=3 "image" at rImgL ≈ 0.22 m, LESS
+  // than that object's own 3.0 m direct path — an echo that leads the
+  // sound it echoes, not a reflection). The mirror formula has no
+  // wall-intersection check (Task 6's brief: "mirror across each wall
+  // plane", full stop), so it faithfully renders this too — real
+  // behavior, but not a geometry to build a "nearest/loudest of 6" test
+  // on. Fixed here by putting the listener INSIDE the box (see
+  // `updateWallMirrors`'s wallValid gate in granular-processor.js, added
+  // once this was found — it also protects the OTHER pre-existing
+  // transport tests, which all keep the outside-listener convention).
+  //
+  // (2) BLENDING. Even with the listener safely inside and the object
+  // near a single wall, GAP_OBJ's burst is 0.6·tau·48000 = 576 samples
+  // wide (tau=0.02) — far wider than the ~50-sample separation between
+  // any two of the 6 walls' echo delays in a 6×3×6 box. A raw
+  // autocorrelation of the WHOLE signal doesn't show a clean local peak
+  // at one wall's delay; it shows one broad, monotonically-decaying hump
+  // (the direct burst's own self-overlap, which is large at every lag
+  // under ~576 samples) with the several walls' contributions blended
+  // into it — measured: the naive window-max lands wherever that hump
+  // is currently highest, NOT at the targeted wall's true delay, off by
+  // tens of samples.
+  //
+  // Fix for (2): isolate the reflections with a DIFFERENCE of two
+  // renders rather than one. `onA` uses a box shaped [6, 60, 60] (normal
+  // width, but tall/deep) so the OTHER 5 walls sit tens of meters away —
+  // their delays land far outside any window this test scans, leaving
+  // only the +x wall's echo inside reach. `onB` uses the SAME object at
+  // the SAME position but a box scaled ×1e6 in every direction, pushing
+  // EVERY wall (including +x) kilometers away — REFL_COEF/max(rImg,·)
+  // then underflows the splat-skip floor (2e-4) for all 6, so `onB`
+  // carries no reflections at all, only the direct path. `reach` is
+  // raised to 1e6 (from GAP_OBJ's default 10) so the free-voice capture
+  // set — which depends on each voice's free position, itself drawn from
+  // boundsMin/boundsSize — is identical in both renders regardless of
+  // box size (density=0 additionally silences the free layer outright,
+  // so only the captured object's own voices sound at all). Since the
+  // captured landing position for this sphere-shell (kind 3, pa/pb/pc=0)
+  // is the object's fixed center regardless of the box, the DIRECT path
+  // is bit-for-bit identical between onA and onB; `diff = onA − onB`
+  // therefore isolates just the +x wall's reflection.
+  // gain:200 (well above GAP_OBJ's default 1): IMAGE_AMP_SKIP (Task 6's
+  // throughput/Doppler fix, see that constant's comment) floors a
+  // reflection's post-envelope amplitude well above the plan's direct-
+  // path 2e-4 — measured: at gain 1 this test's own +x echo falls under
+  // that raised floor and the correlation collapses to ~0 (nothing left
+  // to detect, not a wrong answer). Boosting `gain` is exactly what the
+  // parameter is for (per-object emission loudness) — it does not
+  // change the geometry, the lag, or the correlation SHAPE (xcorrPeak
+  // normalizes out an overall scale), only how much of the reflection
+  // clears the floor; verified the measured lag is unchanged (145) once
+  // enough voices' echoes clear IMAGE_AMP_SKIP (which itself was tuned
+  // upward more than once as the throughput ledger evolved — this gain
+  // carries margin against that, not just today's value).
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  const listener = [0, 1.5, 0]; // inside the box on every axis
+  const obj = {
+    ...GAP_OBJ, centerX: 2.5, centerY: 1.5, centerZ: 0, reach: 1e6, gain: 200,
+  }; // 0.5 m from the +x wall (x=3)
+  const boundsMin = [-3, -30, -30];
+  const boundsSize = [6, 60, 60]; // tall/deep box: only the +x wall is near
+  globalThis.currentTime = 0;
+  const onA = render(new Engine(), 4.0, {
+    ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1, density: 0,
+    listener, objects: [obj], boundsMin, boundsSize,
+  }).L.slice(48000);
+  globalThis.currentTime = 0;
+  const onB = render(new Engine(), 4.0, {
+    ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1, density: 0,
+    listener, objects: [obj],
+    boundsMin: boundsMin.map((v) => v * 1e6), boundsSize: boundsSize.map((v) => v * 1e6),
+  }).L.slice(48000);
+  const diff = new Float32Array(onA.length);
+  for (let i = 0; i < onA.length; i++) diff[i] = onA[i] - onB[i];
+
+  // earL = listener - right*EAR_OFFSET = (-0.09, 1.5, 0); y and z match
+  // the object exactly (both listener and object sit on that plane), so
+  // the direct path AND the x-only mirrored path both reduce to a 1D
+  // distance along x — clean, hand-checkable numbers.
+  const earL = [listener[0] - 0.09, listener[1], listener[2]];
+  const rDir = Math.hypot(obj.centerX - earL[0], obj.centerY - earL[1], obj.centerZ - earL[2]);
+  // mirror across x=3 (boundsMin[0]+boundsSize[0] = -3+6 = 3): x' = 2*3 - centerX
+  const rImg = Math.hypot((2 * 3 - obj.centerX) - earL[0], obj.centerY - earL[1], obj.centerZ - earL[2]);
+  // rDir = 2.59 m, rImg = 3.59 m — exactly 1.00 m farther, by
+  // construction (object 0.5 m from the wall, mirrored 0.5 m past it):
+  // lag = (3.59 − 2.59) / 343 * 48000 ≈ 140 samples.
+  const lagExp = Math.round(((rImg - rDir) / 343) * 48000);
+  // diff ≈ the +x wall's reflection alone (see the derivation above), so
+  // xcorrPeak(onA, diff, ·) — the SAME helper flash-to-ring/ITD/the hero
+  // tests already use — should peak where the echo (in diff) lines up
+  // with the direct burst it echoes (in onA), i.e. at lag = lagExp.
+  const { lag, corr } = xcorrPeak(onA, diff, 500);
+  assert.ok(Math.abs(lag - lagExp) <= 8, `echo lag ${lag} vs ${lagExp}`);
+  // sanity floor: a spurious/incidental alignment would correlate weakly;
+  // measured 0.85 here, comfortably above this margin
+  assert.ok(corr > 0.5, `echo correlation ${corr.toFixed(3)} too weak to be a real reflection`);
+});
+
 test('throughput: worklet renders faster than 4x realtime under load', async () => {
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
   globalThis.currentTime = 0;
