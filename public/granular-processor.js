@@ -368,6 +368,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // owns the voice (fillBed for bed voices, the hero loop for promoted
     // ones): selectHeroes must never read hero-owned Voice state for a
     // voice the bed is deriving into its own struct
+    this.scoreEligible = new Uint8Array(POOL).fill(1); // TRANSPORT hero-
+    // eligibility mask, recorded alongside scoreAmp by the same renderer
+    // (heroEligible); read by selectHeroes in transport mode only.
+    // Default 1: off mode never masks, and a voice is eligible until its
+    // frozen geometry proves otherwise (one-hop staleness, like scoreAmp)
     this.poolSounding = 0; // non-hero pool voices that splatted this hop
     // (fillBed writes it; process() reads it for the bed stats field)
     this.bedSpat = [0, 0]; // scratch for fillBed's spatialize calls — no per-hop alloc
@@ -457,6 +462,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
   selectHeroes() {
     const p = this.p;
     const K = Math.min(POOL, p.heroCount | 0);
+    const transport = !!p.transport;
     for (let k = 0; k < POOL; k++) {
       const capNow = this.scoreCapOn[k] ? 1 : 0;
       // a state flip is salient for ~300ms — single arrivals/departures
@@ -470,6 +476,16 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       if (capNow) s *= 1.5; // playing an instrument leans on heroes
       // hysteresis: current heroes keep a 1.25x advantage
       if (this.heroTarget[k] > 0) s *= 1.25;
+      // TRANSPORT eligibility: a voice whose grains the hero renderer
+      // would truncate unfaithfully (>1% arrival-tail energy — see
+      // heroEligible) must stay in the bed, which renders its arrival
+      // exactly. Without this, a far captured voice promoted to hero
+      // rendered SILENCE (dE ≥ its whole cycle) while bedG suppressed
+      // its bed share — the voice vanished from the mix. Zeroing the
+      // score keeps it out of the top-K; an already-promoted voice that
+      // drifts ineligible fades out on the normal 80ms ramp and the bed
+      // takes it back at (1 − heroGain).
+      if (transport && !this.scoreEligible[k]) s = 0;
       this.heroScore[k] = s;
     }
     // top-K by score (POOL=256: simple selection is fine at 94Hz)
@@ -754,6 +770,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         // design) — it must not read hero-owned Voice state for this voice
         this.scoreCapOn[k] = s.capOn;
         this.scoreAmp[k] = s.capOn ? s.capAmp : s.amp;
+        this.scoreEligible[k] = transport ? this.heroEligible(k, s) : 1;
         continue; // captured: skip the free-burst section
       }
 
@@ -930,6 +947,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // scoring inputs for selectHeroes, free-path shape (capOn is 0 here)
       this.scoreCapOn[k] = 0;
       this.scoreAmp[k] = s.amp;
+      this.scoreEligible[k] = transport ? this.heroEligible(k, s) : 1;
     }
   }
 
@@ -975,6 +993,48 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.bedRR[idx] = rR;
     out[0] = rL;
     out[1] = rR;
+  }
+
+  /** TRANSPORT: may this voice be a hero right now? 1 if the hero
+   *  renderer would be FAITHFUL to it, 0 if it must stay in the bed.
+   *
+   *  The hero loop advances generations on the emission clock, so it
+   *  truncates the part of a grain whose ARRIVAL crosses the next
+   *  generation boundary (dropped duration = max(0, dE − trailing gap)).
+   *  A voice is eligible only while that truncation carries ≤1% of the
+   *  burst's energy: dE ≤ gap + (1 − tail01)·burstLen, with tail01 baked
+   *  per envelope LUT (bakeEnv) and dE = max(dL, dR) read through the
+   *  SAME freezeRadii ring the renderers use (frozen geometry — the
+   *  mask can never disagree with what would actually render).
+   *
+   *  Why exclusion is the right fix (not hero-side arrival enumeration,
+   *  which is Stage 2's stateless splat): physics already imposes ≥ dE
+   *  of flight latency on a far source, and dE exceeds the bed's block
+   *  latency at exactly the distances where the hero renderer becomes
+   *  unfaithful — the hero's zero-latency advantage is void there, so
+   *  bed rendering is both exact AND latency-equivalent. Interaction /
+   *  transition salience remains served for near sources, which is
+   *  where individual grains are resolvable anyway.
+   *
+   *  Called at scoring-record time (block rate, by whichever renderer
+   *  owns the voice), never per sample. `s` is the owner's derivation
+   *  struct (the Voice on the hero path, `v.bed` on the bed path). */
+  heroEligible(k, s) {
+    const rr = this.bedREar;
+    let allowed;
+    if (s.capOn) {
+      this.freezeRadii(k, s.asgGen, s.asgGen * 16 + s.asg + 2, s.px, s.py, s.pz, rr);
+      const tail01 = (this.objEnvLUT[s.asg] || this.envLUT).tail01;
+      // cycle: burst 0.6·cycLen, trailing gap 0.4·cycLen
+      allowed = (0.4 + 0.6 * (1 - tail01)) / s.asgInvTau;
+    } else {
+      this.freezeRadii(k, s.gen, s.gen * 16 + 1, s.fx, s.fy, s.fz, rr);
+      // slot: burst durN·slotLen at offset offN·slotLen — exact
+      // CURRENT-generation values, not a distribution worst-case
+      const slotLen = this.p.tau * (this.voices[k].slotJitter * 1.8);
+      allowed = ((1 - s.offN - s.durN) + s.durN * (1 - this.envLUT.tail01)) * slotLen;
+    }
+    return Math.max(rr[0], rr[1]) / SPEED_OF_SOUND <= allowed ? 1 : 0;
   }
 
   /** TRANSPORT: splat one emitted burst into ONE ear's tile at its
@@ -1133,7 +1193,17 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // cum2[j] = sum of lut[0..j-1]^2 — segment mean-square in O(1)
     const cum2 = new Float32Array(ENV_LUT_SIZE + 2);
     for (let j = 0; j <= ENV_LUT_SIZE; j++) cum2[j + 1] = cum2[j] + lut[j] * lut[j];
-    return { lut, cum2 };
+    // TRANSPORT: tail01 = the normalized age above which the envelope's
+    // remaining energy is ≤1% of the burst total. Baked here (param-rate)
+    // for the hero-eligibility bound: the hero renderer truncates a
+    // grain's arrival tail at the next emission-generation boundary, and
+    // a voice may only be a hero while that truncation stays under 1%
+    // (see heroEligible). Smear 0.5 / asym 0 bakes tail01 ≈ 0.902.
+    const total = cum2[ENV_LUT_SIZE + 1];
+    let jt = ENV_LUT_SIZE + 1;
+    while (jt > 0 && total - cum2[jt - 1] <= 0.01 * total) jt--;
+    const tail01 = Math.min(1, jt / ENV_LUT_SIZE);
+    return { lut, cum2, tail01 };
   }
 
   /** Bake the grain-kernel family from the current envelope LUT: one
@@ -1565,6 +1635,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // hero loop records what the bed would have recorded
       this.scoreCapOn[k] = v.capOn ? 1 : 0;
       this.scoreAmp[k] = v.capOn ? v.capAmp : v.amp;
+      this.scoreEligible[k] = transport ? this.heroEligible(k, v) : 1;
 
       const gTarget = this.heroTarget[k];
 

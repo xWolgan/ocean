@@ -384,12 +384,15 @@ test('cross-generation tail seam: truncated release energy is inaudible at the a
   // burst. Measured 0.26% — the release envelope is already near zero
   // where the cut lands — pinned below 1%.
   //
-  // NOTE (reported, not gated — see task-3-report.md "Fix round"): the
-  // seam law worsens with distance. At dE ≥ tau (r ≥ 6.86 m at tau 0.02)
-  // the hero share of a captured grain is dropped ENTIRELY (pure-hero
-  // render measured fully silent at the far bounds corner, r ≈ 8.2 m,
-  // while the bed renders correctly). That regime needs a design change
-  // (hero-side arrival enumeration), not a tolerance.
+  // The seam law worsens with distance — at dE ≥ tau the hero share of a
+  // captured grain would be dropped ENTIRELY — but hero ELIGIBILITY
+  // (heroEligible, fix round 2) now caps the seam by construction: a
+  // voice may only be promoted while its frozen dE keeps the truncated
+  // tail ≤1%, so this test doubles as the pin that the acceptance
+  // geometry (r 3.0, dE 8.754 ms < the 9.17 ms bound) remains ELIGIBLE —
+  // if this fraction ever crossed 1%, the coherence test above would go
+  // vacuous (heroes masked, mixed ≡ bed). The far-ineligible regime is
+  // covered by the far-corner test below.
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
   globalThis.currentTime = 0;
   const proc = new Engine();
@@ -409,6 +412,39 @@ test('cross-generation tail seam: truncated release energy is inaudible at the a
   }
   const frac = eTail / eAll;
   assert.ok(frac < 0.01, `truncated tail carries ${(100 * frac).toFixed(2)}% of the burst energy`);
+});
+
+test('far voices belong to the bed: eligibility keeps a distant object audible under transport', async () => {
+  // Fix-round-2 regression. At dE ≥ tau (r ≥ 6.86 m at tau 0.02) the
+  // hero renderer drops a captured grain ENTIRELY — its whole arrival
+  // lies past the next emission-generation boundary — so a promoted far
+  // voice rendered silence while bedG suppressed its bed share: the
+  // voice vanished from the mix (measured pre-fix: pure-hero rms 0.00000
+  // vs bed 0.27265). Hero eligibility (heroEligible: truncated
+  // arrival-tail energy ≤1%, thresholds baked per envelope LUT) now
+  // keeps such voices in the bed, which renders their arrival exactly —
+  // and physics makes that free: a far source already carries ≥ dE of
+  // flight latency, more than the bed's block latency at exactly these
+  // distances, so the hero's zero-latency advantage is void there.
+  // Scene from the measurement: object at the far bounds corner
+  // (3, 0, −3), r ≈ 8.2 m, dE ≈ 23.9 ms > tau 20 ms; claim 1 / reach 30
+  // captures every voice; heroCount 256 promotes as many as selection
+  // allows. Post-fix no voice is eligible, so the heroCount 256 render
+  // IS the bed render (near-identical, not merely close).
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  const obj = { ...GAP_OBJ, centerX: 3, centerY: 0, centerZ: -3, reach: 30 };
+  const base = { ...BASE_PARAMS, particleCount: 256, transport: 1, objects: [obj] };
+  globalThis.currentTime = 0;
+  const bedOnly = render(new Engine(), 3.0, { ...base, heroCount: 0 }).L.slice(48000);
+  globalThis.currentTime = 0;
+  const withHeroes = render(new Engine(), 3.0, { ...base, heroCount: 256 }).L.slice(48000);
+  const rms = (b) => Math.sqrt(b.reduce((a, x) => a + x * x, 0) / b.length);
+  assert.ok(rms(withHeroes) > 0.01, `far object vanished from the mix: rms ${rms(withHeroes).toFixed(5)}`);
+  const { lag } = xcorrPeak(bedOnly, withHeroes, 64);
+  assert.ok(Math.abs(lag) <= 4, `far-object hero/bed misalignment ${lag} samples`);
+  let eD = 0, eA = 0;
+  for (let i = 0; i < bedOnly.length; i++) { const d = withHeroes[i] - bedOnly[i]; eD += d * d; eA += bedOnly[i] * bedOnly[i]; }
+  assert.ok(eD / eA < 0.006, `far-object handoff leaks: residual ${(eD / eA).toFixed(4)}`);
 });
 
 function xcorrPeak(a, b, maxLag) {

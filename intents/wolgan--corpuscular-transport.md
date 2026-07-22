@@ -111,3 +111,22 @@ where.
   captured grain drops entirely (pure-hero render silent at the far
   bounds corner while the bed is correct) — needs hero-side arrival
   enumeration, flagged for Task 5/Stage 2. Suite 21 green.
+- Task 3 fix round 2 (controller decision): the far-field hole is closed
+  by ELIGIBILITY, not arrival enumeration (that is Stage 2's stateless
+  splat). `bakeEnv` bakes `tail01` (the age above which ≤1% of burst
+  energy remains); `heroEligible` admits a voice to hero selection only
+  while its frozen dE keeps the truncated arrival tail ≤1% — captured
+  bound (0.4 + 0.6·(1−tail01))·cycLen per object envelope, free bound
+  from the exact current generation's offN/durN — radii read through the
+  same freezeRadii ring the renderers use. `scoreEligible` mask recorded
+  with the scoring inputs by whichever renderer owns the voice;
+  selectHeroes zeroes ineligible scores in transport mode only (off path
+  re-verified bit-identical). Rationale: a far source already carries
+  ≥ dE of flight latency — more than the bed's block latency exactly
+  where the hero becomes unfaithful — so the bed is exact AND
+  latency-equivalent there. At tau 0.02 captured eligibility ends at
+  r ≈ 3.15 m; the acceptance geometry (r 3.0) stays eligible and the
+  coherence test verified non-vacuous (heroes still rendering, residual
+  0.00189 unchanged). New regression test: the far-corner object
+  (r 8.2 m, heroCount 256) must stay audible and near-identical to the
+  bed-only render (pre-fix it was fully silent). Suite 22 green.
