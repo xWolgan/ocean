@@ -762,9 +762,34 @@ test('Doppler: an approaching listener hears the textbook ratio', async () => {
     listener: [0, 1.7, z0 - (q * 128 / 48000) * v], listenerVel: [0, 0, -v],
   })).L;
 
-  // Parabolic-interpolated FFT peak of an 8192-pt Hann-windowed slice
-  // starting at `off`.
-  const peakF = (buf, off) => {
+  // Test-design finding (Task 7, found empirically before touching the
+  // tolerance — same discipline as Tasks 4/5/6's constant/geometry
+  // corrections): this test PRE-DATES the Sabine-tail FDN and used a
+  // global argmax + parabolic-interpolation peak finder. Once Task 7's
+  // always-on FDN (transport mode) joined the render, that finder started
+  // measuring the WRONG bin: a diagnostic FFT dump of the `still` signal
+  // showed a deep NOTCH right at the true 3520 Hz carrier (mag falling
+  // from ~344 two bins below to ~1.5 AT 3520 Hz to ~408 two bins above) —
+  // comb-filter interference from the FDN's four fixed-length delay lines
+  // against this coherent, exactly tau-periodic pulse train. The argmax
+  // then locks onto whichever SIDEBAND of the split happens to be louder
+  // (measured ratio 1.0172 — reproduced identically down to SEND=0.01,
+  // confirming this is a notch-driven bin flip, not an amplitude-
+  // proportional drag: the split exists as soon as the FDN is in the
+  // signal path at all). This is honest new content (the tail is always
+  // audible in transport mode, unlike Task 6's images which could be
+  // amplitude-floored away), so the fix is a more robust MEASUREMENT, not
+  // a smaller FDN: an energy-weighted spectral centroid over a band
+  // around the known carrier averages the notch's two sidebands back to
+  // (very nearly) the true instantaneous frequency, exactly as a centroid
+  // should. Verified empirically over several band widths — all comfortably
+  // under the 0.006 tolerance: [3300,3750] -> 1.0302, [3350,3700] -> 1.0289,
+  // [3250,3800] -> 1.0303 (expected 1.0292) — so the fix is not sensitive
+  // to the exact band chosen; ±230 Hz around the pinned 3520 Hz carrier is
+  // used below (wide enough for the ≈103 Hz Doppler shift plus the
+  // observed ~30-50 Hz notch-sideband spread, narrow enough to stay clear
+  // of unrelated spectral content).
+  const centroidF = (buf, off, fLo, fHi) => {
     const N = 8192;
     const fft = makeFFT(N);
     const win = hannWindow(N);
@@ -772,20 +797,17 @@ test('Doppler: an approaching listener hears the textbook ratio', async () => {
     const im = new Float32Array(N);
     for (let i = 0; i < N; i++) re[i] = buf[off + i] * win[i];
     fft.fft(re, im);
-    let peakBin = 1, peakMag = -Infinity;
-    const mag = new Float32Array(N / 2);
-    for (let k = 1; k < N / 2; k++) {
-      mag[k] = Math.log(re[k] * re[k] + im[k] * im[k] + 1e-20);
-      if (mag[k] > peakMag) { peakMag = mag[k]; peakBin = k; }
+    const kLo = Math.floor((fLo * N) / 48000);
+    const kHi = Math.ceil((fHi * N) / 48000);
+    let num = 0, den = 0;
+    for (let k = kLo; k <= kHi; k++) {
+      const p = re[k] * re[k] + im[k] * im[k]; // power at bin k
+      num += ((k * 48000) / N) * p;
+      den += p;
     }
-    // parabolic interpolation of the log-magnitude peak (3-point, the
-    // standard formula for a quadratic fit through the peak and its
-    // neighbors)
-    const y0 = mag[peakBin - 1], y1 = mag[peakBin], y2 = mag[peakBin + 1];
-    const denom = y0 - 2 * y1 + y2;
-    const delta = denom !== 0 ? 0.5 * (y0 - y2) / denom : 0;
-    return ((peakBin + delta) * 48000) / N;
+    return num / den;
   };
+  const CARRIER = 3520, HALF_BAND = 230; // Hz — see the finding above
   // Slice choice for `appr`, by measurement (not assumption): offset
   // 12000 → t = [0.250, 0.421] s, r = [6.0, 4.29] m — past the OLA/ring
   // warmup (~0.1 s) and object-cycle settle, entirely inside the
@@ -794,9 +816,10 @@ test('Doppler: an approaching listener hears the textbook ratio', async () => {
   // 0.7} s, six slice offsets from t=0.215 to the tail): ratio error
   // spanned +0.0024 to +0.0030 in EVERY combination — same sign, same
   // magnitude, > 2× margin under the 0.006 tolerance; this offset
-  // measured +0.0025. `still` is sliced at its steady tail (last 8192
-  // of the 1 s render, t = [0.829, 1.0] s).
-  const ratio = peakF(appr, 12000) / peakF(still, still.length - 8192);
+  // measured +0.0025 (pre-FDN, with the argmax finder). `still` is sliced
+  // at its steady tail (last 8192 of the 1 s render, t = [0.829, 1.0] s).
+  const ratio = centroidF(appr, 12000, CARRIER - HALF_BAND, CARRIER + HALF_BAND)
+    / centroidF(still, still.length - 8192, CARRIER - HALF_BAND, CARRIER + HALF_BAND);
   // textbook Doppler ratio for a listener approaching a stationary source
   // at v m/s in air (SPEED_OF_SOUND = 343 m/s): fE/f = 1 + v/c
   const expected = 1 + v / 343;
@@ -994,24 +1017,85 @@ test('wall validity freezes with the grain: mid-generation plane crossings stay 
   assert.ok(rFlip < rStill * 1.5, `plane-crossing energy anomaly: flip rms ${rFlip} vs still ${rStill}`);
 });
 
-test('throughput: worklet renders faster than 3x realtime under load', async () => {
+test('the room glows and dies at the configured RT60', async () => {
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  // strong scene for 1s, then silence (level 0) — measure tail decay.
+  // (Brief transcription note: the brief's own draft comment had a
+  // non-ASCII typo — "силence" — fixed here.)
+  globalThis.currentTime = 0;
+  const obj = { ...GAP_OBJ };
+  const killQuantum = Math.floor(48000 / 128); // = 375, lands at t = 1.000s exactly
+  const out = render(new Engine(), 3.0, {
+    ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1, objects: [obj],
+  }, (q) => (q === killQuantum ? { objects: [], density: 0 } : null)).L;
+  const E = (t0, t1) => {
+    let s = 0;
+    for (let i = (t0 * 48000) | 0; i < t1 * 48000; i++) s += out[i] * out[i];
+    return s;
+  };
+  // Drain arithmetic, re-derived against THIS scene (not assumed — same
+  // discipline as Tasks 4/5/6's constant/geometry corrections): the kill
+  // patch takes effect at quantum 375 = t = 1.000s exactly (375*128/48000).
+  // Any burst already in flight, or any arrival the bed's widened
+  // enumeration was already tracking, keeps sounding for up to:
+  //   dE  (flight time, GAP_OBJ at r = hypot(3.0, 0.09) = 3.00135 m)  ~  8.8 ms
+  //   bLen = 0.6*tau (GAP_OBJ tau=0.02)                               = 12.0 ms
+  //   DMAX (widened bed lookback for a budgeted/image-eligible voice) = 90.0 ms
+  //   OLA/ring pipeline latency ~ BLOCK/sampleRate (1024/48000)       ~ 21.3 ms
+  //   + one HOP's scheduling granularity (512/48000)                 ~ 10.7 ms
+  //                                                          total   ~ 142.8 ms
+  // — comfortably inside (< half) the 300ms this test allows before its
+  // first window (1.3s = kill + 0.3s), so by then only the FDN's own
+  // recirculating tail remains: the two 300ms windows below measure ONLY
+  // that tail's decay, not lingering direct/echo content.
+  //
+  // decay slope between the two post-drain windows: RT60=0.4s means
+  // 60dB / 0.4s -> -45dB "ideal" over a 0.3s window; the FDN is
+  // statistical honesty (a diffuse recirculating tail), not a precision
+  // filter, so the brief's own generous corridor (-25..-70 dB) is used
+  // rather than a tight tolerance around -45.
+  const dbDrop = 10 * Math.log10(E(1.6, 1.9) / E(1.3, 1.6));
+  assert.ok(dbDrop < -25 && dbDrop > -70, `tail slope ${dbDrop.toFixed(1)} dB per 0.3s`);
+  // guard against a vacuous pass: with SEND=0 (or a silently-disconnected
+  // tap) both windows would sit at hard silence / float noise floor, and
+  // some noise-floor ratios could still land inside a wide dB corridor by
+  // accident. The FDN must actually be RINGING in the first window — a
+  // real recirculating tail from a scene this loud measures many orders
+  // of magnitude above the silence floor.
+  const e0 = E(1.3, 1.6);
+  assert.ok(e0 > 1e-6, `first window carries no real tail energy: E=${e0.toExponential(2)} — FDN isn't ringing`);
+});
+
+test('throughput with full transport stays >=3x realtime at 524k', async () => {
+  // This IS the Task 7 brief's own dedicated throughput-on test — the 3x
+  // re-gate (ms < 1333) already landed in Task 6's fix round (see the
+  // comment history below), so Task 7's job was to verify this test's
+  // params/assertion already match the brief's intent (they do: same
+  // 524288 particles / heroCount 48 / tau 0.004, and `transport` is now
+  // explicit rather than relying on the constructor default of 1 — no
+  // behavior change, just naming this test what it now formally is) and
+  // keep it green with the FDN folded into the render loop.
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
   globalThis.currentTime = 0;
   const proc = new Engine();
-  const params = { ...BASE_PARAMS, particleCount: 524288, heroCount: 48, tau: 0.004 };
+  const params = {
+    ...BASE_PARAMS, particleCount: 524288, heroCount: 48, tau: 0.004, transport: 1,
+  };
   render(proc, 0.5, params); // warmup
   const t0 = process.hrtime.bigint();
   render(proc, 4.0, params);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-  console.log(`  throughput: ${(4000 / ms).toFixed(1)}x realtime`);
+  console.log(`  transport-on throughput: ${(4000 / ms).toFixed(1)}x realtime`);
   // 3x: the plan's transport-on budget (docs/superpowers/plans/
   // 2026-07-22-corpuscular-transport.md, Global Constraints "≥3× realtime
-  // at 524,288 particles, transport ON"; Task 7 formalizes it with its
-  // own dedicated test). 4× (ms < 1000) was the pre-transport gate and
-  // is load-fragile with images: Task 6's measured in-suite range is
-  // 3.2-4.8× depending on ambient system load (see IMAGE_TOP_K's ledger
-  // comment in granular-processor.js) — most runs clear 4× but not all,
-  // so the pre-transport number would flake on real, working code. This
-  // is the plan's own budget arriving one task early, not a weakening.
+  // at 524,288 particles, transport ON"). 4× (ms < 1000) was the
+  // pre-transport gate and is load-fragile with images: Task 6's measured
+  // in-suite range is 3.2-4.8× depending on ambient system load (see
+  // IMAGE_TOP_K's ledger comment in granular-processor.js) — most runs
+  // clear 4× but not all, so the pre-transport number would flake on
+  // real, working code. Task 7 adds a small always-on FDN (4 delay lines +
+  // a Hadamard mix per sample, allocation-free) on top of that same
+  // budget — see task-7-report.md for the measured multi-run range with
+  // the FDN active; it stayed comfortably inside this 3x gate.
   assert.ok(ms < 1333, `4s of audio took ${ms.toFixed(0)}ms`);
 });

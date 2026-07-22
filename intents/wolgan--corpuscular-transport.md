@@ -383,3 +383,78 @@ where.
   now state precisely that the check runs before airGain/fc (both ≤1 —
   permissive, under-skip only). Suite 27/27 green; tsc + legacy check
   clean.
+- Task 7 landed — the Sabine tail, and the formal 3x throughput gate. A
+  4-line FDN (delays {1031,1327,1523,1801} samples, own Float32Array ring
+  buffers sized exactly to their delay so a single index implements each
+  line, Hadamard/2 feedback mix — orthogonal, energy-preserving, so decay
+  comes ONLY from the per-line gains, never the mix itself) sits in
+  `process()` between the hero loop and the rumble-blocker/limiter:
+  per-line gain `10^(-3*N/(RT60*sampleRate))` (RT60=0.4, computed once at
+  construction — pow is fine there, banned only at hop/sample rate), input
+  `(dryL+dryR)*SEND` (SEND=0.12) tapped BEFORE the limiter, outputs
+  `L += (d0-d2)*0.5`, `R += (d1-d3)*0.5` added into the dry mix so the
+  tail rides through the SAME HP/limiter chain as everything else
+  (ordering decision commented at both the FDN block and the limiter site
+  — a tail should get the same headroom treatment as the dry signal, not
+  dodge it). Transport-off is a STRUCTURAL bypass (the whole block behind
+  `if (p.transport)`, not a wet gain of 0) — verified directly that with
+  transport 0 every fdnBuf/fdnPos byte stays at its constructor-zero state
+  after a render, and the pre-existing null test (off-path regression
+  floor) stayed green untouched.
+  RT60 test (`the room glows and dies at the configured RT60`): a strong
+  1s scene (GAP_OBJ, sync 1) killed via onQuantum (`objects:[]` +
+  `density:0`) at quantum 375 (= t=1.000s exactly), decay measured between
+  two 300ms windows starting 300ms after the kill. Drain arithmetic
+  re-derived against this exact scene (not assumed): dE ~8.8ms + bLen
+  12ms + DMAX 90ms + OLA/ring latency ~21.3ms + one HOP's granularity
+  ~10.7ms ~= 142.8ms, comfortably under half the 300ms allowed before the
+  first window — so by then only the FDN's own tail remains. Corridor
+  -25..-70 dB per 0.3s (RT60=0.4 implies -45dB "ideal"; the FDN is
+  statistical honesty, not a precision filter, per the brief) plus a
+  non-vacuous-pass guard (first window must carry real tail energy, not a
+  0/0 or noise-floor accident with e.g. SEND=0).
+  Throughput: this IS the Task 7 brief's own dedicated transport-on test —
+  the 3x re-gate (ms<1333) already landed in Task 6's fix round, so the
+  existing full-suite throughput test was verified to match the brief's
+  params/assertion exactly (524288 particles, heroCount 48, tau 0.004) and
+  renamed/re-commented rather than duplicated; `transport: 1` made
+  explicit (was relying on the constructor default, no behavior change).
+  Measured in-suite (`node --test "tests/*.test.mjs"`, the realistic,
+  ambient-load-affected case every prior ledger entry in this file uses),
+  repeated runs: 3.6-5.2x realtime with the FDN active, comfortably above
+  the 3x floor; isolated single-test runs measured ~8.1-8.2x (the same
+  in-suite-vs-isolated gap this file's other throughput ledgers note).
+  Test-design finding (found empirically, same discipline as Tasks 4-6):
+  adding the always-on FDN broke the PRE-EXISTING Doppler test — a
+  diagnostic FFT dump showed a deep NOTCH landing almost exactly at the
+  3520 Hz pinned carrier (comb interference from the FDN's four fixed
+  delay lengths against GAP_OBJ's exactly tau-periodic pulse train),
+  splitting energy into two sidebands; the old argmax+parabolic peak
+  finder locked onto whichever sideband was louder (ratio 1.0172,
+  reproduced identically down to SEND=0.01 — a notch-driven bin flip, not
+  an amplitude-proportional drag). Since the tail is honest, always-on
+  content (unlike Task 6's images, which could be amplitude-floored away),
+  the fix was a more robust MEASUREMENT: an energy-weighted spectral
+  centroid over a ±230 Hz band around the pinned 3520 Hz carrier, verified
+  stable across several band widths (1.0289-1.0303 vs expected 1.0292, all
+  well inside the unweakened 0.006 tolerance).
+  Controller addition — IMAGE_AMP_SKIP relaxation (budget the FDN
+  afforded): lowered stepwise (2.0 -> 1.0 -> 0.5 -> 0.25 -> 0.1 -> 0.075 ->
+  0.05), full suite re-measured at every step for BOTH throughput (>=3
+  runs) and correctness (all 28 tests). Throughput margin never broke,
+  even at 0.05 (still >=3.3x every run); the actual stop was a
+  CORRECTNESS floor between 0.1 and 0.075 — the "bed/hero crossfade is
+  complementary" energy-conservation test (±0.4dB) started leaking
+  (0.637dB at 0.05) once enough previously-sub-floor reflections cleared
+  the amp skip for heroCount 0 vs 32 to stop matching that tightly (heroes
+  never render their own reflections). Landed at IMAGE_AMP_SKIP = 0.1
+  (~500x the direct path's floor, vs 2.0's ~10000x): full 28/28 green,
+  throughput median ~3.7x with every individual run >=0.2x above the 3x
+  floor. This clears the brief's aspirational <=0.25 "generally audible"
+  target with room to spare, reached by measurement (the crossfade test)
+  rather than assumption. Full measured (value, throughput, correctness)
+  table is in the constant's own comment and task-7-report.md.
+  Suite 28/28 green (`tests/*.test.mjs` glob); `npx tsc --noEmit` and
+  `node --check public/granular-legacy.js` clean; legacy file untouched;
+  IMAGE_TOP_K left at 16 (unchanged — that dial belongs to a listening
+  session, per the brief, not a test).
