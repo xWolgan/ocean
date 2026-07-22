@@ -39,6 +39,20 @@ import {
   makeFFT, hannWindow, makeKernel, splatBlob, kernelIntEnergy, bakeGrainKernel,
 } from './dsp.js';
 
+// --- Transport constants (docs/superpowers/plans/2026-07-22-corpuscular-
+// transport.md, "Global Constraints") ---
+// These are the single source of truth for propagation physics and
+// TRANSPLANT VERBATIM to the Stage-2 GPU splat shader once it exists.
+// Per CLAUDE.md's deterministic-twins duty, that transplant must keep
+// this block bit-for-bit identical on both sides — the same warning that
+// already governs pcgHash/hash() and the shared grain math applies here.
+const SPEED_OF_SOUND = 343; // m/s
+const EAR_OFFSET = 0.09; // m, half the interaural distance (earL/earR straddle the listener along `right`)
+const NEAR_CLAMP = 0.25; // m, amplitude-only floor (1/max(r, NEAR_CLAMP)); propagation DELAYS always use the true r
+const REFL_COEF = 0.7; // image-source wall reflection coefficient (Task 6)
+const RT60 = 0.4; // s, Sabine tail decay target (Task 7's FDN)
+const AIR_COEF = 2.8e-6; // air absorption: alpha(f) = AIR_COEF * f^2, gain = exp(-alpha * r) (~ -1 dB at 4 kHz over 7 m)
+
 const POOL = 256;
 // calibrated against legacy engine RMS, Task 5 (measured total-level
 // offset with the grain-kernel family, slot-anchored phases and true
@@ -219,6 +233,16 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       timeOffset: 0,
       listener: [0, 1.7, 4.4],
       right: [1, 0, 0],
+      // transport scaffolding (corpuscular-transport Task 1): 1 = ON, the
+      // eventual default once propagation physics lands; 0 = OFF, the
+      // bit-sacred Stage-1 behavior (see the null test vs granular-
+      // legacy.js). Task 1 itself is a no-op either way — nothing reads
+      // this flag for an audible effect yet.
+      transport: 1,
+      // listener velocity (AudioEngine: EMA'd finite difference of the
+      // camera's world position, clamped to |v| <= 20 m/s per component).
+      // Consumed by Doppler (Task 5); unused so far.
+      listenerVel: [0, 0, 0],
       boundsMin: [-3, 0, -3],
       boundsSize: [6, 3, 6],
       stride: 512,
@@ -226,6 +250,13 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // centerX, centerY, centerZ, reach}
       objects: [],
     };
+    // ear positions, derived from listener/right at every params
+    // ingestion (never mid-grain — per-grain transport quantities freeze
+    // per (voice, generation, ear) at burst start downstream; see the
+    // plan's foreign-clock constraint). Preallocated, mutated in place.
+    this.earL = [0, 0, 0];
+    this.earR = [0, 0, 0];
+    this.updateEars();
     // the particle-count dial is a performance dial, not a crescendo: pin
     // perceived loudness to the legacy calibration at any count, keep all
     // internal ratios (density, layers, objects) honest. Computed here from
@@ -332,6 +363,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         for (const o of this.p.objects) {
           if (o) o.tau = Math.max(o.tau, 0.0005);
         }
+        // ears follow listener/right at control rate; this is only a
+        // position update (never a phase reset), so it obeys the
+        // foreign-clock rule the same way every other control-rate param
+        // does — grains already in flight read earL/earR at their next
+        // natural evaluation, not mid-splat.
+        this.updateEars();
         // the particle-count dial is a performance dial, not a crescendo: pin
         // perceived loudness to the legacy calibration at any count, keep all
         // internal ratios (density, layers, objects) honest
@@ -347,6 +384,22 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         this.testTone = e.data.data;
       }
     };
+  }
+
+  /** Recompute earL/earR from p.listener/p.right (shared formula: `earL =
+   *  listener - right*EAR_OFFSET`, `earR = listener + right*EAR_OFFSET`).
+   *  Mutates the preallocated arrays in place — no per-call allocation,
+   *  though this runs at control rate (params ingestion), not the hop/
+   *  sample hot loop. */
+  updateEars() {
+    const L = this.p.listener;
+    const R = this.p.right;
+    this.earL[0] = L[0] - R[0] * EAR_OFFSET;
+    this.earL[1] = L[1] - R[1] * EAR_OFFSET;
+    this.earL[2] = L[2] - R[2] * EAR_OFFSET;
+    this.earR[0] = L[0] + R[0] * EAR_OFFSET;
+    this.earR[1] = L[1] + R[1] * EAR_OFFSET;
+    this.earR[2] = L[2] + R[2] * EAR_OFFSET;
   }
 
   /** Score every pool voice's salience and mark the top heroCount in

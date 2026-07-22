@@ -262,6 +262,19 @@ test('bed/hero crossfade is complementary: no energy dug out at moderate weight'
   assert.ok(Math.abs(db) < 0.4, `crossfade leaked ${db.toFixed(3)} dB at W=16`);
 });
 
+test('transport off is bit-identical to pre-transport engine', async () => {
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  globalThis.currentTime = 0;
+  const off = render(new Engine(), 2.0, { ...BASE_PARAMS, particleCount: 256, heroCount: 8, transport: 0 }).L;
+  globalThis.currentTime = 0;
+  const on = render(new Engine(), 2.0, { ...BASE_PARAMS, particleCount: 256, heroCount: 8, transport: 1 }).L;
+  // Task 1 ships transport as a no-op: on === off bit-exactly for now.
+  // Task 2 will REPLACE this assertion with the flash-to-ring lag test.
+  for (let i = 0; i < off.length; i++) {
+    assert.ok(off[i] === on[i], `diverged at sample ${i}`);
+  }
+});
+
 function xcorrPeak(a, b, maxLag) {
   // normalized cross-correlation peak of a vs b over lags -maxLag..maxLag
   let ea = 0, eb = 0;

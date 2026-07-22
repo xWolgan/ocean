@@ -46,3 +46,13 @@ where.
 - Spec approved 2026-07-22; implementation plan written:
   `docs/superpowers/plans/2026-07-22-corpuscular-transport.md` (8 tasks).
 - Execution in progress (subagent pipeline).
+- Task 1 landed: transport scaffolding only — the `SPEED_OF_SOUND`/
+  `EAR_OFFSET`/`NEAR_CLAMP`/`REFL_COEF`/`RT60`/`AIR_COEF` constants block
+  in `granular-processor.js` (transplant target for Stage 2), `p.transport`
+  (default 1) and `p.listenerVel` (default `[0,0,0]`) in params, `earL`/
+  `earR` recomputed from `listener`/`right` at every params ingestion,
+  `AudioEngine` resolving `?transport=off` once (like `?audio=legacy`) and
+  computing an EMA-smoothed, clamped listener velocity, and the overlay's
+  `transport on|off` line. Nothing audible changed — no code yet reads
+  `transport`, `listenerVel`, `earL`, or `earR` for sound. Task 2 wires the
+  bed's per-ear arrival.

@@ -149,6 +149,7 @@ renderer.setAnimationLoop((now: number) => {
       `particles ${Math.round(field.count * bus.out.density).toLocaleString()}\n` +
       `voices    ${audio.voiceCount} heroes + ~${audio.bedCount.toLocaleString()} bed\n` +
       `audio     ${audio.status}\n` +
+      `transport  ${audio.transportMode}\n` +
       `backend   ${(renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'WebGPU' : 'WebGL2'}` +
       (readbackProbe ? `\n${readbackProbe.stats}` : '');
   }
