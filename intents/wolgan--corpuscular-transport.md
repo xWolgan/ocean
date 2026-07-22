@@ -506,6 +506,52 @@ where.
   `node --check public/granular-legacy.js` clean, live probe PROBE PASS
   including the new flash-to-ring check.
 
+- FINAL REVIEW (whole branch) + fix round. The reviewer's CRITICAL: the
+  shared `TRANSPORT_RING` (one 512-slot ring per voice for BOTH
+  timelines, distinguished only by tag) let the free and captured
+  timelines evict each other's in-flight freezes — a captured hero
+  voice freezes both timelines every quantum, and whenever
+  gFree ≡ gObj (mod 512) the two tags thrashed one slot, each revisit
+  RE-FREEZING "frozen" geometry from the current listener pose (the
+  foreign-clock bend the ring exists to prevent; voices whose counters
+  advance at near-equal rates stay residue-locked for seconds).
+  Measured: 19,094 cross-timeline evictions over a 6 s moving-listener
+  render. FIXED by splitting the rings per timeline (free 512 slots /
+  captured 256, direct AND image rings — the image freezes shared the
+  identical collision), routed by the timeline every call site already
+  knows (`TL_FREE`/`TL_CAP`); sizing arithmetic redone per ring at each
+  ring's own tau floor, including the defensive global-tau case
+  (0.00025 s — the worklet never clamps p.tau; ledger item 8): free
+  ≈496 ≤ 512, captured ≈224 ≤ 256. A `frozenRecomputes` determinism
+  sentinel (one timeline-class comparison at freeze-miss time, nothing
+  per sample, documented as a sentinel not telemetry) counts
+  cross-timeline evictions — structurally impossible post-split — and
+  a new regression test (29th) renders the thrash scenario (near
+  eligible object, heroCount 32, swaying listener via onQuantum, 6 s,
+  global tau tuned so many voices generation-lock) and asserts EXACTLY
+  0 (pre-fix: 19,094). Audio sanity, same scenario pre/post: static
+  listener agrees to float noise (max Δ 7.5e-9 — the split alone
+  changes nothing), moving listener max Δ 5.6e-4 at rms 0.281 — the
+  removed bend was real and motion-only. Object-to-object handoffs
+  within the captured ring remain theoretically collide-able but are
+  transient and self-healing (noted at the constant). IMPORTANT:
+  the wall-validity guard's comment (b) reasoned from the old
+  IMAGE_AMP_SKIP 2.0; re-measured at 0.1 with the Task-6 simulated
+  pre-fix method — at gain 20 legit images now clear the floor (fixed
+  0.986 / pre-fix 1.679: still split by the 1.5 bound but premise
+  false, margin 0.18); re-scened to object gain 0.5 (sweep showed the
+  sub-floor regime stabilize at gain ≤1): fixed 1.014 / pre-fix 1.884,
+  real margin both sides. Minors: gain-invariance phrasing softened in
+  all three places (exact-silence cutoff is the decisive datum; ramp
+  comparison limiter-confounded); hero absorption one-pole step hoisted
+  OUT of the amplitude gate so its "stepped every sample" contract is
+  true (memory now decays through gated silence, tail reaches output;
+  2 mul-adds/ear, idle voices still fast-path-skipped); SPEC §7.2 notes
+  the ≈3 dB transport delta is geometry-dependent (grows toward far
+  corners), not a constant. 29/29 tests, tsc clean, legacy untouched +
+  `node --check` clean; transport-off writes nothing to the rings
+  (freezeRadii unreachable off-path) — the null-test floor never moved.
+
 ## Final state (branch complete)
 
 All 8 plan tasks landed. Phenomena verified end to end (offline suite +
