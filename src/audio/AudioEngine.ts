@@ -22,6 +22,15 @@ export class AudioEngine {
   private node: AudioWorkletNode | null = null;
   private lastSend = 0;
   private lastTargetsVersion = -1;
+  /** Resolved once in start(), same pattern as the ?audio=legacy picker:
+   *  ?transport=off ships 0 (bit-sacred Stage-1 behavior), else 1. */
+  private transportFlag: 0 | 1 = 1;
+  /** Previous tick's listener world position, for the velocity finite
+   *  difference below. Null until the first tick that isn't throttled away. */
+  private prevListenerPos: THREE.Vector3 | null = null;
+  private prevListenerT = 0;
+  /** EMA-smoothed listener velocity (alpha=0.2), pre-clamp. */
+  private listenerVelEma: [number, number, number] = [0, 0, 0];
 
   /** Latest audible voice count reported by the worklet, for the overlay. */
   voiceCount = 0;
@@ -29,6 +38,8 @@ export class AudioEngine {
   bedCount = 0;
   /** Human-readable engine state for the overlay (remote debugging). */
   status = 'off (click to start)';
+  /** 'off' when ?transport=off, else 'on' — for the overlay. */
+  transportMode: 'on' | 'off' = 'on';
 
   get running(): boolean {
     return this.ctx !== null && this.ctx.state === 'running';
@@ -46,10 +57,14 @@ export class AudioEngine {
       return;
     }
     // ?audio=legacy loads the frozen pre-tile engine for A/B comparison
+    const urlParams = new URLSearchParams(location.search);
     const requested =
-      new URLSearchParams(location.search).get('audio') === 'legacy'
-        ? 'granular-legacy.js'
-        : 'granular-processor.js';
+      urlParams.get('audio') === 'legacy' ? 'granular-legacy.js' : 'granular-processor.js';
+    // ?transport=off keeps the bit-sacred Stage-1 behavior; resolved once,
+    // same pattern as `requested` above.
+    const transportOff = urlParams.get('transport') === 'off';
+    this.transportFlag = transportOff ? 0 : 1;
+    this.transportMode = transportOff ? 'off' : 'on';
     try {
       const ctx = await this.initContext(requested);
       this.status = ctx.state;
@@ -129,7 +144,35 @@ export class AudioEngine {
     camera.getWorldPosition(_listener);
     _right.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
 
-
+    // listener velocity: finite difference of the world position between
+    // update ticks (this method is already throttled to ~60Hz above),
+    // EMA-smoothed (alpha=0.2) so one noisy tick can't slam a grain's
+    // Doppler shift, each component clamped to |v| <= 20 m/s. Scaffolding
+    // only in Task 1 — nothing on the audio side reads listenerVel yet
+    // (Task 5 will, under the freeze-per-generation rule). First tick (no
+    // previous position yet) sends [0, 0, 0].
+    if (this.prevListenerPos) {
+      const dt = tSec - this.prevListenerT;
+      if (dt > 0) {
+        const alpha = 0.2;
+        const vx = (_listener.x - this.prevListenerPos.x) / dt;
+        const vy = (_listener.y - this.prevListenerPos.y) / dt;
+        const vz = (_listener.z - this.prevListenerPos.z) / dt;
+        this.listenerVelEma[0] += alpha * (vx - this.listenerVelEma[0]);
+        this.listenerVelEma[1] += alpha * (vy - this.listenerVelEma[1]);
+        this.listenerVelEma[2] += alpha * (vz - this.listenerVelEma[2]);
+      }
+      this.prevListenerPos.copy(_listener);
+    } else {
+      this.prevListenerPos = _listener.clone();
+    }
+    this.prevListenerT = tSec;
+    const clampVel = (v: number) => Math.max(-20, Math.min(20, v));
+    const listenerVel: [number, number, number] = [
+      clampVel(this.listenerVelEma[0]),
+      clampVel(this.listenerVelEma[1]),
+      clampVel(this.listenerVelEma[2]),
+    ];
 
     // ship full constellations only when they change; the worklet samples
     // per-generation targets itself with the same hashes as the GPU
@@ -165,6 +208,8 @@ export class AudioEngine {
         timeOffset: tSec - this.ctx.currentTime,
         listener: [_listener.x, _listener.y, _listener.z],
         right: [_right.x, _right.y, _right.z],
+        transport: this.transportFlag,
+        listenerVel,
         boundsMin: [
           FIELD_CENTER.x - FIELD_HALF_EXTENTS.x,
           FIELD_CENTER.y - FIELD_HALF_EXTENTS.y,

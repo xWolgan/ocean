@@ -218,6 +218,133 @@ legacy engine lacks this floor).
   otherwise; see `PERF.md` for results and boundary 9 below.
 - `?count=N` — pin particle count at page load without touching the
   performance panel (used by the probes above for repeatable runs).
+- `?transport=off` — reverts to the Stage-1 spatialization (pan +
+  `1/(1+0.35d²)` distance gain, no arrival delay, no absorption, no
+  Doppler, no room) for A/B listening and for null-test comparison
+  against the frozen legacy engine. Resolved once at `AudioEngine.start()`
+  (same pattern as `?audio=legacy`); default (no param) is transport ON.
+  With `transport=off` the engine reproduces Stage-1 output bit-exactly —
+  the existing legacy null test is the regression floor and stays green
+  in this mode untouched by any of §7.2 below.
+
+### 7.2 Corpuscular transport
+
+`public/granular-processor.js` gives every deposited grain closed-form
+propagation physics instead of rendering space as loudness alone (per
+`docs/superpowers/specs/2026-07-19-corpuscular-transport-design.md`).
+All terms are per-particle, state-free, closed-form math — designed to
+transplant line-for-line into the Stage-2 GPU splat shader once that
+gate opens (§9); none of it is per-grain mutable state a shader could
+not reproduce. The duplicated-math duty (`CLAUDE.md`) applies to every
+constant below exactly as it does to the free/object hash salts.
+
+- **Per-ear arrival (the load-bearing term).** Ears are `earL = listener
+  − right·EAR_OFFSET`, `earR = listener + right·EAR_OFFSET`
+  (`EAR_OFFSET = 0.09` m, half the interaural distance). Every grain's
+  burst becomes, per ear, `t_arrival = t_emit + r_ear / SPEED_OF_SOUND`
+  (`SPEED_OF_SOUND = 343` m/s) — the received carrier is the same
+  anchored oscillator with its anchor displaced by the flight time
+  (`anchorE = anchor + dE`). This alone yields the flash-to-ring gap
+  (≈3 ms/m), ITD, per-ear interference (anti-phase nulls in one ear,
+  reinforcement in the other), and comb filtering from path-length
+  differences. Frozen per (voice, generation, ear) at first
+  consideration — a grain's arrival schedule never bends mid-flight
+  (foreign-clock principle).
+- **True 1/r spreading.** Amplitude factor `1 / max(r_ear, NEAR_CLAMP)`
+  (`NEAR_CLAMP = 0.25` m) replaces the old ad-hoc `1/(1+0.35d²)` rolloff;
+  the clamp is amplitude-only — propagation DELAYS always use the true,
+  unclamped r. No pan, no bass-mono in transport mode: each ear receives
+  the full pressure independently.
+- **Air absorption.** `alpha(f) = AIR_COEF · f²` (nepers·m⁻¹·Hz⁻²), gain
+  `= exp(−alpha(f) · r_ear)`. `AIR_COEF = 2.2e-10` (≈0.03 dB/m at 4 kHz,
+  0.19 dB/m at 10 kHz — ISO-9613-order, f² small-room approximation;
+  deliberately subtle over the box's ≤9 m diagonal). *Correction made
+  during execution:* the plan's original constant, `2.8e-6`, was ~4
+  orders of magnitude too strong (it silenced every kHz carrier within
+  meters — the plan's own parenthetical, "≈−1 dB at 4 kHz over 7 m",
+  itself implied ~1e-9); `2.2e-10` is the corrected, physical value.
+  Baked into a 2D `[frequency-bucket × log-spaced r-step]` LUT at
+  construction — no `exp`/`pow` at hop rate. Bed: every partial dims by
+  its own frequency's absorption (a grain's spectrum tilts, not just its
+  level). Heroes: a per-ear one-pole lowpass approximating the same law
+  at the voice's single carrier, recomputed from the frozen r_ear each
+  block.
+- **Doppler.** Frozen per (voice, generation, ear): range rate
+  `rdot = −dot(unit(grainPos − ear), listenerVel)`; received carrier
+  `f_ear = f · (1 − rdot / SPEED_OF_SOUND)`. Heroes: exact, from the
+  time-varying delay tap itself (no dedicated code — the same closed
+  form the arrival term already uses). Bed: per-block carrier-shift
+  multiplier applied to the splat's bin and phase alike. Honest for
+  grains ≤100 ms at listener speeds ≤20 m/s — the linearize-around-the-
+  freeze-instant approximation has a measured ≤0.6% worst-case
+  intra-grain frequency error over that range. Air absorption stays on
+  the TRUE (unshifted) emitted frequency in both renderers — physically
+  the wave travels the medium at its emitted frequency; the Doppler
+  shift is a receiver-side artifact of relative motion.
+- **First-order image sources (early reflections), salience-budgeted.**
+  Each of the 6 room walls (`[boundsMin, boundsMin+boundsSize]`, the
+  6×3×6 m field box) mirrors a budgeted grain into one more per-ear
+  splat: `amp = REFL_COEF · base / max(r_img, NEAR_CLAMP)`
+  (`REFL_COEF = 0.7`), with absorption/delay/Doppler computed at the
+  true mirrored distance `r_img`. Budget: any current hero OR this hop's
+  top-`IMAGE_TOP_K` voices by amplitude (`IMAGE_TOP_K = 16`, tuned down
+  from an initial 64 to hold the throughput gate — a listening-session
+  dial, not test-gated). A post-envelope amplitude floor
+  (`IMAGE_AMP_SKIP = 0.1`, ~500× the direct path's own floor) skips
+  reflections too quiet to matter; measured to stay well inside the
+  "generally audible" target while holding throughput. Frozen wall
+  VALIDITY (a wall only ever splats for an ear on the room's interior
+  side of it) freezes in the same per-(voice, generation, ear) ring as
+  the radii — an echo is part of the grain's propagation geometry and
+  must not appear or vanish mid-flight, even under a plane-crossing
+  listener. Doppler for images uses the mirrored-listener trick (mirror
+  the ear once per control tick rather than every grain generation —
+  cheaper, and correct because a wall reflection is an isometry and its
+  own inverse).
+- **Late tail — a shared Sabine-matched FDN.** A 4-line feedback delay
+  network (delays 1031/1327/1523/1801 samples, Hadamard/2 feedback mix —
+  orthogonal and energy-preserving, so decay comes only from the
+  per-line gains) fed by `(dryL+dryR) · SEND` (`SEND = 0.12`) tapped
+  before the limiter, decaying at the configured `RT60 = 0.4` s
+  (per-line gain `10^(−3·delaySamples/(RT60·sampleRate))`, computed once
+  at construction). Statistically honest where the ear is statistical
+  (late, dense reflections), exact where the ear is exact (the
+  early/sparse image sources above) — the same "honest where it can be,
+  statistical where it must be" split the spectral-tile bed itself
+  uses for direct sound. Structurally bypassed (not merely a zero wet
+  gain) when transport is off.
+- **Hero eligibility.** A voice is only admitted to hero selection while
+  its frozen flight delay keeps the truncated release tail within a
+  ≤1%-energy bound (`heroEligible`/`tail01`, baked from the envelope
+  LUT); beyond that bound a far voice's flight latency already exceeds
+  the bed's own block latency, so the bed renders it exactly AND at
+  latency parity — a promoted hero would otherwise render a truncated,
+  unfaithful tail (or, at the extreme far bound, nothing at all). Far
+  voices are therefore bed-rendered by design, not by omission.
+- **Loudness note.** Transport mode is measured ≈3 dB hotter than
+  transport-off at matched settings: the old path split a fixed pan
+  power budget across both ears, where transport gives each ear the
+  full `1/r` field pressure independently (the physically correct
+  behavior for two independent ears, not a bug). The on-vs-off delta is
+  geometry-dependent — `1/r` diverges from the old rolloff more toward
+  far corners, so ≈3 dB is the reference-scene measurement, not a
+  constant — and the `gain` dial absorbs it; there is no compensating
+  attenuation baked in.
+- **Sub-Schroeder claim.** `f_Schroeder = 2000·√(RT60/V) ≈ 120 Hz` for
+  this box (V ≈ 108 m³, RT60 = 0.4 s). Below that floor a real room's
+  behavior is modal, not statistical — the engine does NOT claim modal
+  accuracy there: below ≈120 Hz the engine claims geometric propagation
+  only (the same per-ear arrival/1r/absorption/Doppler terms above,
+  applied uniformly across the spectrum); a modal floor (~50 analytic
+  box-mode resonators driven by low-band energy) is a decision-gated
+  future increment — listening decides whether it's worth adding, per
+  the design spec §2.4. This is a stated boundary, not a defect.
+- **Foreign-clock extension.** All frozen-per-generation transport
+  quantities (r_ear, dE, ṙ_ear, the Doppler carrier multiplier, wall
+  validity) are computed once at a voice-generation's first
+  consideration and never revised mid-grain — a live-session control
+  change (listener motion, a manual `transport` toggle) can only affect
+  the NEXT generation, never retroactively bend one already in flight.
 
 ## 8. Compositor UI
 
@@ -250,6 +377,18 @@ legacy engine lacks this floor).
   voices sounding, audible energy correctly in-band (not rumble); offline
   throughput 9.3× realtime at 524,288 particles (heroCount 48, tau 4 ms)
   on Wolgan's desktop.
+- Corpuscular transport (§7.2), transport-on: throughput 3.6–3.8×
+  realtime in-suite / 8.1–8.2× isolated at 524,288 particles (heroCount
+  48, tau 4 ms), comfortably above the 3× design floor; live flash-to-
+  ring measurement at r = 3.0 m matched the predicted r/343 ≈ 8.75 ms
+  within the probe's ±3 ms tolerance across five consecutive runs (see
+  `PERF.md`). The bed's enumeration lookback (`DMAX` + burst length +
+  hop granularity, ≈133 ms) gives it an audibility horizon of ≈45 m of
+  flight distance — beyond that a voice's arrival falls outside every
+  hop's lookback window and the bed is silent by enumeration boundary,
+  not by any audibility law. The 6×3×6 m field box (diagonal ≈9.4 m,
+  plus at most one more box crossing for a first-order image path) never
+  approaches this horizon in normal play.
 - Target: standalone Quest 3 (probe procedure in README); WebGL2
   fallback constraints in CLAUDE.md are hard requirements. Stage 2 (GPU
   splat pass feeding the tile directly, replacing the worklet's own

@@ -39,7 +39,247 @@ import {
   makeFFT, hannWindow, makeKernel, splatBlob, kernelIntEnergy, bakeGrainKernel,
 } from './dsp.js';
 
+// --- Transport constants (docs/superpowers/plans/2026-07-22-corpuscular-
+// transport.md, "Global Constraints") ---
+// These are the single source of truth for propagation physics and
+// TRANSPLANT VERBATIM to the Stage-2 GPU splat shader once it exists.
+// Per CLAUDE.md's deterministic-twins duty, that transplant must keep
+// this block bit-for-bit identical on both sides — the same warning that
+// already governs pcgHash/hash() and the shared grain math applies here.
+const SPEED_OF_SOUND = 343; // m/s
+const EAR_OFFSET = 0.09; // m, half the interaural distance (earL/earR straddle the listener along `right`)
+const NEAR_CLAMP = 0.25; // m, amplitude-only floor (1/max(r, NEAR_CLAMP)); propagation DELAYS always use the true r
+const REFL_COEF = 0.7; // image-source wall reflection coefficient (Task 6)
+const RT60 = 0.4; // s, Sabine tail decay target (Task 7's FDN)
+// Air absorption: alpha(f) = AIR_COEF * f^2 (nepers·m⁻¹·Hz⁻²), amplitude
+// gain = exp(-alpha(f) * r). AIR_COEF = 2.2e-10 gives alpha(4kHz) =
+// 2.2e-10·1.6e7 = 3.52e-3 Np/m = 0.031 dB/m (×8.686 dB/Np) and 0.19 dB/m
+// at 10 kHz — the ISO 9613 order of magnitude for mid-humidity air under
+// the f² small-room approximation. Over our box's ≤9 m paths the effect
+// is deliberately subtle (~0.3 dB at 4 kHz across the room): physical
+// honesty, not a special effect.
+// (Corrected during Task 4: the plan's original 2.8e-6 was ~4 orders of
+// magnitude too strong — its own parenthetical "≈ −1 dB at 4 kHz over
+// 7 m" implies ~1e-9, and 2.8e-6 silenced every kHz carrier within
+// meters, gutting the instrument's highs.)
+const AIR_COEF = 2.2e-10;
+// Air-absorption LUT shape (Task 4): frequency buckets reuse the
+// GRAIN_BUCKETS PATTERN (round-log2-and-clamp) rather than the duration
+// array itself — a fresh, finer axis, because carrier frequency is a
+// continuum (hueToFreq + harmonics), not five fixed sizes. ¼-octave
+// buckets are plenty: absorption only needs to shape a whole critical
+// band's worth of energy together, and the LUT's OTHER axis (r) gets real
+// linear interpolation because r is what audibly moves from hop to hop.
+const AIR_F_BUCKETS_PER_OCT = 4;
+const AIR_F_MIN = 20; // Hz, floor of the bucket range (below the keyboard's lowest note, 55 Hz)
+const AIR_R_STEPS = 16; // log-spaced r steps, linearly interpolated at lookup
+const AIR_R_MIN = NEAR_CLAMP; // 0.25 m — same floor as the amplitude clamp
+const AIR_R_MAX = 12; // m — covers the box diagonal + first-order image paths (see DMAX's comment)
+const DMAX_DIRECT = 0.03; // s, the ORIGINAL (Task 2) direct-path-only
+// lookback — kept as its own constant (not folded into DMAX below)
+// because fillBed uses it per-voice: a voice with no wall images to
+// catch (not this hop's `wantImages`) only ever needs to look back far
+// enough for its OWN direct arrival, and re-widening every voice's
+// enumeration for a reflection only a MINORITY of voices (the salience
+// budget) ever render was measured to cost real throughput for no
+// audible benefit (see IMAGE_AMP_SKIP's comment and the task-6 report's
+// throughput ledger) — narrowing it back for non-budgeted voices was
+// the fix, alongside IMAGE_TOP_K and IMAGE_AMP_SKIP.
+const DMAX = 0.09; // s, max flight time the bed enumerates for a
+// BUDGETED voice (≈30.9 m at c=343) — direct path AND first-order
+// images, since an image's path is always longer than the direct one (a
+// reflection can only add distance); widening DMAX for THOSE voices
+// instead of adding a second, image-only lookback lets one enumeration
+// loop catch every arrival, direct or reflected, when it matters.
+// NOTE (Task 5 review; arithmetic redone here for Task 6's 0.09):
+// "beyond the box diagonal" understates the AUDIBLE range of loud
+// coherent sources — a sync=1 captured object (tau 0.02) measures full
+// strength out to a horizon set by this constant, widened: lookback
+// DMAX+0.6·tau (0.09+0.012 = 102 ms) + up to one cycle from the
+// enumeration's floor() truncation (20 ms) + the designated-hop
+// mid-strip (~10 ms — itself ignoring the burst's own bLen/2 half-width,
+// a sub-ms term at this tau/duty and not re-derived further since the
+// RAMP's existence, not this last term, is what's asserted) ≈ 132 ms ≈
+// 45.3 m; the ramp is hop/cycle alignment. The attribution (enumeration
+// horizon, NOT the amp ≤ 2e-4 splat floor) rests on the EXACT-SILENCE
+// cutoff: rms exactly 0 beyond the horizon, unmoved by a 4× gain boost
+// at DMAX=0.03 — an amplitude floor would migrate outward with gain.
+// The ramp-shape comparison under boosted gain agreed but is only
+// supporting evidence (the master limiter's gain-riding confounds level
+// comparisons there). Unchanged in kind at 0.09, just wider. Harmless
+// for in-box listeners; flagged for the Task 8 docs pass.
+// Task 6 salience budget: any isHero[k] OR a top-IMAGE_TOP_K scoreAmp[k]
+// gets 6 wall-image splats (see computeImageBudget — the same top-K scan
+// pattern as selectHeroes, run over scoreAmp rather than heroScore).
+//
+// THROUGHPUT LEDGER (measured, not guessed — see task-6-report.md for
+// the full trail): the brief's own top-64 dropped 524k/hero48/tau0.004
+// throughput to ~2.6-3.7x realtime, under the suite's own ≥4x gate (and
+// close to the plan's global ≥3x floor) — images multiply a budgeted
+// voice's bed cost ×7 (6 image splats + 1 direct), and heroCount 48 +
+// top-64 covers ~112/256 pool voices at those settings. Four
+// independent measures closed the gap, in the order they were tried and
+// measured:
+//   1. IMAGE_TOP_K 64 -> 32 -> 16 (this constant). Diminishing but real
+//      returns; 16 alone was not sufficient.
+//   2. DMAX_DIRECT (below): the enumeration lookback only widens to the
+//      full image-covering DMAX for a voice THIS HOP's `wantImages` —
+//      every other voice (the large majority) keeps the original,
+//      narrower direct-only lookback. This turned out to be the
+//      SINGLE BIGGEST win: widening every voice's enumeration for a
+//      reflection only ~16-112 of 256 ever render was pure waste.
+//   3. freezeImageRadii skips a wall's geometry entirely when NEITHER
+//      ear can validly hear it (updateWallMirrors' wallValid gate) —
+//      small but free (the file's own out-of-box-listener convention
+//      already invalidates one wall in most existing test geometries).
+//   4. IMAGE_AMP_SKIP (below): raised well past the direct path's 2e-4,
+//      pruning the quietest reflections outright.
+// Net, measured across MANY repeated `node --test "tests/*.test.mjs"`
+// runs at the final tuning (this constant + IMAGE_AMP_SKIP 2.0 below):
+// 3.2-4.8x realtime, MOST runs clearing the suite's ≥4x gate but not
+// every one — reported honestly rather than claiming a guarantee (see
+// IMAGE_AMP_SKIP's comment for why, and why this is mostly a
+// PRE-EXISTING environment property, not a clean regression: the
+// pre-Task-6 baseline itself measured ~4.3x in-suite vs ~8.9x in an
+// isolated fresh process, so the margin over the gate was already thin
+// before Task 6 touched anything). The spread itself widened visibly
+// with ambient system load across this session's OWN measurement
+// batches (tight ~4.0-4.8x on a quieter machine, sagging toward
+// 3.2-3.9x under sustained load from the repeated measurement runs
+// themselves) — this is measurement-environment noise, not a function
+// of scene content, and no further constant-tuning was found to remove
+// it. Earlier, less-tuned points on this same trail measured lower
+// still (e.g. 2.6-3.7x with the brief's own top-64 and the plan's 2e-4
+// floor) — Task 6's four measures (this constant, DMAX_DIRECT, the
+// wallValid geometry-skip, IMAGE_AMP_SKIP) together recovered most but
+// not reliably all of the pre-Task-6 margin; flagged for Task 7's 3x
+// re-gate, which this constant's own trade-off (below) anticipates
+// relaxing. The echo-lag test below (a single loud captured object,
+// gain boosted specifically to clear the raised IMAGE_AMP_SKIP — see
+// that test's own comment) still resolves cleanly (corr ≈0.86)
+// throughout this whole tuning pass — the cuts remove quiet/marginal
+// reflections, not the audible ones.
+const IMAGE_TOP_K = 16;
+// Post-envelope amplitude floor for IMAGE splats only (see
+// splatBurstArrival's `ampSkip` param) — higher than the direct path's
+// plan-specified 2e-4.
+//
+// HISTORY: Task 6 originally set this to 2.0 (~10000x the direct path's
+// floor) under the INFORMAL, pre-Task-7 4x throughput gate — at 2e-4 the
+// suite regressed on TWO fronts once images landed: (a) throughput, per
+// IMAGE_TOP_K's ledger above, and (b) the Doppler test (heroCount 0, one
+// loud captured object) measured ratio 1.0171 instead of its established
+// ~1.032, because a reflection's OWN Doppler shift comes from the
+// MIRRORED geometry's range rate, which differs from the direct path's —
+// even a quiet extra tone at a slightly different shift dragged a
+// narrowband FFT-peak measurement off target. 2.0 pruned all but the
+// loudest, nearest-wall reflections and was flagged in that task's report
+// for Task 7 to revisit once the FDN tail and the formal 3x re-gate gave
+// more throughput headroom to lower it.
+//
+// TASK 7: the ledger's own instruction ("measure the trade") applied —
+// lowered stepwise (2.0 was the start; 1.0, 0.5, 0.25, 0.1, 0.075, 0.05
+// measured in turn), full suite (`node --test "tests/*.test.mjs"`, ≥3
+// runs each, the SAME ambient-load-realistic method every prior ledger
+// entry in this file uses) re-measured at every step for BOTH throughput
+// AND correctness (all 28 tests, not just the throughput one):
+//   2.0    -> median ~4.6x   (4.3–4.7 across 3 runs)  28/28 green
+//   1.0    -> median ~4.2x   (4.1–4.8 across 3 runs)  28/28 green
+//   0.5    -> median ~4.7x   (4.5–4.9 across 3 runs)  28/28 green
+//   0.25   -> median ~4.0x   (3.6–4.2 across 3 runs)  28/28 green
+//   0.1    -> median ~3.7x   (3.6–3.8 across 5 runs)  28/28 green
+//   0.075  -> median ~3.7x   (3.4–3.9 across 3 runs)  27/28 — FAILS
+//   0.05   -> median ~3.7x   (3.5–3.9 across 3 runs)  27/28 — FAILS
+// Below 0.1 the "bed/hero crossfade is complementary" test (W=16 energy-
+// conservation gate, ±0.4 dB) breaks first — 0.637 dB leaked at 0.05 —
+// because enough previously-sub-floor reflections start clearing the
+// floor that heroCount 0 vs 32 stop being close enough at this budget's
+// tight tolerance (heroes never render their own reflections — see that
+// test's own comment); this is a CORRECTNESS floor, not a throughput one,
+// and it binds before the throughput margin does (throughput itself held
+// >=3.3x, comfortably above the 3x+0.2x stop condition, at every step
+// measured, including 0.05). Landed at IMAGE_AMP_SKIP = 0.1: the lowest
+// value that held BOTH gates with margin — throughput median ~3.7x
+// (>=0.2x above the 3x floor at every individual run, not just the
+// median) and the full 28-test suite green with no exceptions. 0.1 is
+// ~500x the direct path's floor (vs 2.0's ~10000x) — a real, honest
+// relaxation: the design's quieter/farther echoes that used to vanish
+// under 2.0 are now audible, though the brief's aspirational ≤0.25 (where
+// "the room becomes generally audible") was cleared with room to spare;
+// 0.1 was not reached by assumption but by measurement finding the next
+// constraint (the crossfade test) before the throughput gate.
+const IMAGE_AMP_SKIP = 0.1;
+
+// Sabine tail (Task 7): a small 4-line Feedback Delay Network gives the
+// room a statistically-honest late reverb decaying at RT60 — spec §2.3.
+// This is NOT a geometric room simulation (no wall-specific delay/damping
+// beyond the first-order images above): it is the STATISTICAL tail every
+// real room grows once first-order reflections stop being individually
+// resolvable — an admission that the box has walls, expressed as decay
+// statistics rather than more discrete echoes. Mutually incommensurate
+// (non-integer-ratio) delay lengths keep any single comb-filter frequency
+// from dominating the tail (a shared factor would make one frequency ring
+// far longer than its neighbors — audible as a metallic ring, not a room).
+const FDN_DELAYS = [1031, 1327, 1523, 1801]; // samples, transport mode only
+// dry (L+R) tap level feeding the network — tapped PRE-LIMITER (see the
+// process() call site) so the tail is driven by the same signal the
+// listener's ears are, not a post-limiter-compressed copy
+const FDN_SEND = 0.12;
+
 const POOL = 256;
+// per-voice frozen-radius rings (transport), ONE PER TIMELINE — indexed
+// by TL_FREE/TL_CAP below; the image rings share the same pair. A ring
+// must cover the widest generation window one hop can enumerate, so
+// tags never collide within a burst's flight — a collision can't
+// corrupt the CURRENT hop's own arithmetic (evaluateCapture/
+// refreshFreeGeneration always resync s.px/s.fx to the generation being
+// processed before freezeRadii reads them), but it WOULD let a
+// still-in-flight grain's frozen geometry be silently evicted and
+// recomputed against a later listener position on revisit — exactly the
+// foreign-clock bend these rings exist to prevent.
+//
+// WHY per-timeline rings (final review, measured): a single shared ring
+// indexed `g mod N` with the timeline only in the TAG let the two
+// timelines collide. A captured hero voice freezes BOTH its timelines
+// every quantum (free at v.gen, captured at v.asgGen); whenever
+// gFree ≡ gObj (mod N) the two tags thrashed ONE slot, and every
+// revisit re-froze "frozen" geometry from the CURRENT listener pose —
+// block-rate phase steps in the hero closed form, hop-to-hop arrival
+// drift in the bed, under exactly the moving listener (VR head motion)
+// transport exists for. Voices whose two counters advance at near-equal
+// rates (slotJitter ≈ 0.556 at matched taus) stay residue-locked for
+// SECONDS. Measured on the shared ring: 19,094 cross-timeline evictions
+// over a 6 s moving-listener render (the sentinel test's scenario);
+// with split rings the collision is structurally impossible — a ring
+// only ever holds one timeline's tags — and the frozenRecomputes
+// sentinel (constructor) pins it at exactly 0.
+// (Within the CAPTURED ring, an object-to-object HANDOFF can still in
+// principle collide — two objects' unrelated generation counters mod
+// RING slots — but a handoff retires the old object's in-flight window
+// for that voice, so a stale eviction there is transient and
+// self-healing, unlike the permanent two-timelines-one-voice interleave
+// the split removes. Not counted by the sentinel: it compares timeline
+// CLASSES, free vs captured.)
+//
+// Sizing, per ring (margin arithmetic redone for the final review,
+// including the global-tau-floor case — ledger item 8):
+// FREE (512 slots): window = blockT 0.02133 + DMAX 0.09 lookback +
+//   0.75·slotLen. Global p.tau comes from lifespanToTau with lifespan
+//   bus-clamped to [0,1] (ModulationBus RANGES), so tau ≥ 0.001 s →
+//   slotLen ≥ 0.001·0.5·1.8 = 0.0009 s → ≈124 slots (≈4× margin) in
+//   any state the UI can actually produce. The worklet itself does NOT
+//   clamp p.tau (unlike object tau below), so the ring is sized
+//   defensively for the smallest tau reachable ANYWHERE in the system —
+//   the per-object floor lifespanToTau(0)/2^octave = 0.001/4 =
+//   0.00025 s: slotLen ≥ 0.000225 s, window 0.11150 s → ≈496 slots
+//   ≤ 512. Coverage holds even at that floor (margin 16 slots).
+// CAPTURED (256 slots): object tau IS floored in this file at params
+//   ingestion (0.0005 s, mirroring the GPU clamp), so the guarantee is
+//   worklet-enforced: window = blockT 0.02133 + DMAX 0.09 + 0.6·tau
+//   lookback = 0.11163 s → ≈224 cycles ≤ 256 (≈14% margin).
+const TL_FREE = 0; // ring selector: the free timeline
+const TL_CAP = 1; // ring selector: the captured (object) timelines
+const TRANSPORT_RING = [512, 256]; // slots, indexed [TL_FREE, TL_CAP]
 // calibrated against legacy engine RMS, Task 5 (measured total-level
 // offset with the grain-kernel family, slot-anchored phases and true
 // wavetable blend in place; see task-5-report.md, fix round 2)
@@ -143,8 +383,15 @@ class Voice {
     this.capTableFrac = 0;
     this.capOn = 0;
     this.capAmp = 0;
+    this.capAmp0 = 0; // emission loudness sans spatialize() magnitude —
+    // transport's amplitude source (1/max(rE,NEAR_CLAMP) replaces it)
     this.capPanL = 0.7;
     this.capPanR = 0.7;
+    // raw captured landing position (world m) — transport reads the
+    // position itself, not spatialize()d gains
+    this.px = 0;
+    this.py = 0;
+    this.pz = 0;
     this.capPhase = 0; // separate oscillator phase per timeline — the free
     // clock must never touch a captured grain's phase
 
@@ -166,6 +413,7 @@ class Voice {
     this.gen = -1e18;
     this.capturedNow = false;
     this.amp = 0;
+    this.amp0 = 0; // free emission loudness sans spatialize() magnitude
     this.panL = 0.7;
     this.panR = 0.7;
     this.phase = 0;
@@ -190,11 +438,12 @@ class Voice {
       fx: 0, fy: 0, fz: 0,
       freeTableA: 0, freeTableB: 0, freeTableFrac: 0,
       freeSat: 0, freeFreq: 440,
-      amp: 0, panL: 0.7, panR: 0.7,
+      amp: 0, amp0: 0, panL: 0.7, panR: 0.7,
       asg: -1, asgGen: -1e18, asgInvTau: 1, asgPhi: 0,
       capPhase: 0, capOn: 0, capFreq: 440, capSat: 0, capBright: 1,
-      capTableA: 0, capTableB: 0, capTableFrac: 0, capAmp: 0,
+      capTableA: 0, capTableB: 0, capTableFrac: 0, capAmp: 0, capAmp0: 0,
       capPanL: 0.7, capPanR: 0.7,
+      px: 0, py: 0, pz: 0,
     };
   }
 }
@@ -219,6 +468,16 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       timeOffset: 0,
       listener: [0, 1.7, 4.4],
       right: [1, 0, 0],
+      // transport scaffolding (corpuscular-transport Task 1): 1 = ON, the
+      // eventual default once propagation physics lands; 0 = OFF, the
+      // bit-sacred Stage-1 behavior (see the null test vs granular-
+      // legacy.js). Task 1 itself is a no-op either way — nothing reads
+      // this flag for an audible effect yet.
+      transport: 1,
+      // listener velocity (AudioEngine: EMA'd finite difference of the
+      // camera's world position, clamped to |v| <= 20 m/s per component).
+      // Consumed by Doppler (Task 5); unused so far.
+      listenerVel: [0, 0, 0],
       boundsMin: [-3, 0, -3],
       boundsSize: [6, 3, 6],
       stride: 512,
@@ -226,6 +485,28 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // centerX, centerY, centerZ, reach}
       objects: [],
     };
+    // ear positions, derived from listener/right at every params
+    // ingestion (never mid-grain — per-grain transport quantities freeze
+    // per (voice, generation, ear) at burst start downstream; see the
+    // plan's foreign-clock constraint). Preallocated, mutated in place.
+    this.earL = [0, 0, 0];
+    this.earR = [0, 0, 0];
+    // Task 6: mirrored-ear scratch (6 walls, one per ear) must exist
+    // BEFORE the updateEars() call below, since updateEars() calls
+    // updateWallMirrors() which writes into these every time (see that
+    // method's doc comment for why the ear, not the grain, is mirrored).
+    this.mirrorEarL = [];
+    this.mirrorEarR = [];
+    for (let w = 0; w < 6; w++) {
+      this.mirrorEarL.push([0, 0, 0]);
+      this.mirrorEarR.push([0, 0, 0]);
+    }
+    // 1 if that ear sits on the room's INTERIOR side of wall w's plane
+    // (the only configuration a mirror-image reflection is physically
+    // sensible for) — see updateWallMirrors for why this gate exists.
+    this.wallValidL = new Uint8Array(6);
+    this.wallValidR = new Uint8Array(6);
+    this.updateEars();
     // the particle-count dial is a performance dial, not a crescendo: pin
     // perceived loudness to the legacy calibration at any count, keep all
     // internal ratios (density, layers, objects) honest. Computed here from
@@ -255,6 +536,30 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // limiter: envelope follower (instant attack, ~250ms release)
     this.limEnv = 0;
     this.limRelease = Math.exp(-1 / (0.25 * sampleRate));
+
+    // --- Sabine tail: 4-line FDN (Task 7, transport mode only) ---
+    // Each buffer is sized EXACTLY to its own delay length: a circular
+    // buffer of length N implements an N-sample delay line by reading
+    // index i (the value written N samples ago) before overwriting it
+    // with the new sample — no separate read/write cursor pair needed,
+    // one index per line. Structural bypass when p.transport is 0 (see
+    // process()): these buffers/pointers are simply never touched, not
+    // multiplied by a zero gain — the null test's regression floor must
+    // see literally zero state writes here, not silence built from them.
+    this.fdnBuf = FDN_DELAYS.map((nSamp) => new Float32Array(nSamp));
+    this.fdnPos = new Int32Array(FDN_DELAYS.length);
+    // per-line feedback gain: 10^(-3*N/(RT60*sampleRate)). After RT60
+    // seconds a line of length N samples has made RT60*sampleRate/N round
+    // trips, so its own recirculating energy has fallen by
+    // gain^(RT60*sampleRate/N) = 10^(-3*N/(RT60*sampleRate) * RT60*sampleRate/N)
+    // = 10^-3 = -60 dB, exactly RT60's definition — every line decays at
+    // the SAME target rate despite their different lengths. Math.pow is
+    // fine here: this runs once at construction, never in the per-sample
+    // hot loop (Global Constraints: no pow at hop/sample rate).
+    this.fdnGain = new Float32Array(FDN_DELAYS.length);
+    for (let fi = 0; fi < FDN_DELAYS.length; fi++) {
+      this.fdnGain[fi] = Math.pow(10, (-3 * FDN_DELAYS[fi]) / (RT60 * sampleRate));
+    }
 
     // --- spectral-tile bed (one IFFT per hop per ear renders the mass) ---
     this.fftEngine = makeFFT(BLOCK);
@@ -317,9 +622,133 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // owns the voice (fillBed for bed voices, the hero loop for promoted
     // ones): selectHeroes must never read hero-owned Voice state for a
     // voice the bed is deriving into its own struct
+    this.scoreEligible = new Uint8Array(POOL).fill(1); // TRANSPORT hero-
+    // eligibility mask, recorded alongside scoreAmp by the same renderer
+    // (heroEligible); read by selectHeroes in transport mode only.
+    // Default 1: off mode never masks, and a voice is eligible until its
+    // frozen geometry proves otherwise (one-hop staleness, like scoreAmp)
     this.poolSounding = 0; // non-hero pool voices that splatted this hop
     // (fillBed writes it; process() reads it for the bed stats field)
     this.bedSpat = [0, 0]; // scratch for fillBed's spatialize calls — no per-hop alloc
+    // frozen per (voice, generation, ear) transport radii — see
+    // freezeRadii. Generation-indexed rings per voice, ONE PER TIMELINE
+    // (outer index TL_FREE/TL_CAP — see TRANSPORT_RING's comment for the
+    // cross-timeline collision this split removes); the Float64 tag
+    // (NaN = never written, and NaN !== NaN keeps empty slots cold)
+    // detects staleness. Preallocated: the hop path allocates nothing.
+    this.bedRL = [
+      new Float32Array(POOL * TRANSPORT_RING[TL_FREE]),
+      new Float32Array(POOL * TRANSPORT_RING[TL_CAP]),
+    ];
+    this.bedRR = [
+      new Float32Array(POOL * TRANSPORT_RING[TL_FREE]),
+      new Float32Array(POOL * TRANSPORT_RING[TL_CAP]),
+    ];
+    // Doppler (Task 5): rdotL/rdotR ride the SAME ring, same tag, same
+    // freeze instant as rL/rR — a grain's carrier shift is frozen exactly
+    // when its geometry is (see freezeRadii).
+    this.bedRdotL = [
+      new Float32Array(POOL * TRANSPORT_RING[TL_FREE]),
+      new Float32Array(POOL * TRANSPORT_RING[TL_CAP]),
+    ];
+    this.bedRdotR = [
+      new Float32Array(POOL * TRANSPORT_RING[TL_FREE]),
+      new Float32Array(POOL * TRANSPORT_RING[TL_CAP]),
+    ];
+    this.bedRTag = [
+      new Float64Array(POOL * TRANSPORT_RING[TL_FREE]).fill(NaN),
+      new Float64Array(POOL * TRANSPORT_RING[TL_CAP]).fill(NaN),
+    ];
+    this.bedREar = [0, 0, 0, 0]; // freezeRadii out-scratch [rL, rR, rdotL, rdotR]
+    // DETERMINISM SENTINEL (not telemetry — a harness-visible invariant
+    // counter, asserted exactly 0 by the cross-timeline-thrash regression
+    // test): counts ring evictions where a slot's frozen tag belonged to
+    // the OTHER timeline class (free vs captured) than the tag claiming
+    // it. Such an eviction means a still-in-flight grain's frozen
+    // geometry was thrown away and will be recomputed against a LATER
+    // listener pose on revisit — the foreign-clock bend the freeze rings
+    // exist to prevent. Cost: one class comparison on ring MISSES only
+    // (freezeRadii/freezeImageRadii), nothing in the hit path, nothing
+    // per sample.
+    this.frozenRecomputes = 0;
+
+    // air absorption (Task 4): exp(-AIR_COEF*f²*r) baked into a 2D
+    // [fBucket x rStep] LUT here at construction — Math.exp/Math.pow never
+    // run at hop rate, only here, once. See airGain() for the lookup (¼-
+    // octave nearest bucket on f, linear interpolation on r).
+    // airFLog2Min is the bucket-index ANCHOR, so it must itself be an
+    // integer (rounded, same as every per-call bucket index) — AIR_F_MIN
+    // isn't a power of 2 like GRAIN_BUCKETS' base, so its raw log2 is
+    // fractional; leaving it unrounded would make every fi below a
+    // non-integer LUT offset (a silent NaN from the Float32Array read).
+    this.airFLog2Min = Math.round(Math.log2(AIR_F_MIN) * AIR_F_BUCKETS_PER_OCT);
+    this.airFBuckets = Math.round(Math.log2((sampleRate * 0.5) / AIR_F_MIN) * AIR_F_BUCKETS_PER_OCT) + 1;
+    this.airRLogRatio = Math.log(AIR_R_MAX / AIR_R_MIN);
+    this.airGainLUT = new Float32Array(this.airFBuckets * AIR_R_STEPS);
+    for (let fi = 0; fi < this.airFBuckets; fi++) {
+      const f = 2 ** ((fi + this.airFLog2Min) / AIR_F_BUCKETS_PER_OCT);
+      for (let ri = 0; ri < AIR_R_STEPS; ri++) {
+        const r = AIR_R_MIN * (AIR_R_MAX / AIR_R_MIN) ** (ri / (AIR_R_STEPS - 1));
+        this.airGainLUT[fi * AIR_R_STEPS + ri] = Math.exp(-AIR_COEF * f * f * r);
+      }
+    }
+    // per-voice, per-ear one-pole lowpass state for the hero approximation
+    // of the same law (Task 4) — allocation-free, persists across blocks
+    // like the master limiter/HP state below; reset at promotion (see the
+    // PROMOTION CONTINUITY block in process()) so a voice's filter memory
+    // never leaks from a previous, unrelated hero stint.
+    this.heroLpL = new Float32Array(POOL);
+    this.heroLpR = new Float32Array(POOL);
+
+    // --- Task 6: first-order wall images (bed-only, salience-budgeted) ---
+    // 6 walls of [boundsMin, boundsMin+boundsSize], indexed 0..5 as
+    // (xmin,xmax,ymin,ymax,zmin,zmax): axis = w>>1, isMax = w&1.
+    // (mirrorEarL/mirrorEarR themselves are allocated earlier, above the
+    // constructor's updateEars() call, since updateWallMirrors needs them
+    // to already exist.)
+    // frozen per (voice, generation) image ranges/range-rates, one ring
+    // PER WALL per ear, per TIMELINE (outer index TL_FREE/TL_CAP: the
+    // free/captured image freezes shared the identical cross-timeline
+    // collision the direct rings had — see TRANSPORT_RING's comment) —
+    // the SAME freezing contract as bedRL/bedRR/bedRdotL/bedRdotR above
+    // (freezeImageRadii is freezeRadii's Task-6 twin). Only ever written
+    // for BUDGETED voices (imageMask), so this memory buys a
+    // rarely-touched cache, not a hot-loop cost.
+    this.bedIRL = [[], []]; this.bedIRR = [[], []];
+    this.bedIRdotL = [[], []]; this.bedIRdotR = [[], []];
+    for (let tl = 0; tl < 2; tl++) {
+      for (let w = 0; w < 6; w++) {
+        this.bedIRL[tl].push(new Float32Array(POOL * TRANSPORT_RING[tl]));
+        this.bedIRR[tl].push(new Float32Array(POOL * TRANSPORT_RING[tl]));
+        this.bedIRdotL[tl].push(new Float32Array(POOL * TRANSPORT_RING[tl]));
+        this.bedIRdotR[tl].push(new Float32Array(POOL * TRANSPORT_RING[tl]));
+      }
+    }
+    // one shared tag per timeline ring: all 6 walls freeze together, at
+    // the same (voice, generation) instant (see freezeImageRadii), so
+    // one NaN-clean staleness check covers all of them
+    this.bedITag = [
+      new Float64Array(POOL * TRANSPORT_RING[TL_FREE]).fill(NaN),
+      new Float64Array(POOL * TRANSPORT_RING[TL_CAP]).fill(NaN),
+    ];
+    // frozen per-generation wall-validity mask (fix round): bit w = ear L
+    // may hear wall w, bit w+6 = ear R. Validity is PART of the grain's
+    // frozen geometry, not a live read — see freezeImageRadii's
+    // foreign-clock note (a live read let a mid-generation listener
+    // plane-crossing flip a wall valid whose radii were never computed,
+    // reading rImg≈0 → a zero-delay, near-clamp-amplitude spurious blob).
+    this.bedIValid = [
+      new Uint16Array(POOL * TRANSPORT_RING[TL_FREE]),
+      new Uint16Array(POOL * TRANSPORT_RING[TL_CAP]),
+    ];
+    this.imgOut = new Float32Array(24); // freezeImageRadii out-scratch:
+    // [wall*4 + {0:rL,1:rR,2:rdotL,3:rdotR}]
+    // salience budget mask (Task 6): any current hero OR this hop's
+    // top-IMAGE_TOP_K scoreAmp gets images; imgTopMask is scratch for
+    // the top-K scan (selectHeroes' own pattern), imageMask is the
+    // final OR'd result fillBed reads.
+    this.imgTopMask = new Uint8Array(POOL);
+    this.imageMask = new Uint8Array(POOL);
 
     this.port.onmessage = (e) => {
       if (e.data.type === 'params') {
@@ -332,6 +761,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         for (const o of this.p.objects) {
           if (o) o.tau = Math.max(o.tau, 0.0005);
         }
+        // ears follow listener/right at control rate; this is only a
+        // position update (never a phase reset), so it obeys the
+        // foreign-clock rule the same way every other control-rate param
+        // does — grains already in flight read earL/earR at their next
+        // natural evaluation, not mid-splat.
+        this.updateEars();
         // the particle-count dial is a performance dial, not a crescendo: pin
         // perceived loudness to the legacy calibration at any count, keep all
         // internal ratios (density, layers, objects) honest
@@ -347,6 +782,69 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         this.testTone = e.data.data;
       }
     };
+  }
+
+  /** Recompute earL/earR from p.listener/p.right (shared formula: `earL =
+   *  listener - right*EAR_OFFSET`, `earR = listener + right*EAR_OFFSET`).
+   *  Mutates the preallocated arrays in place — no per-call allocation,
+   *  though this runs at control rate (params ingestion), not the hop/
+   *  sample hot loop. */
+  updateEars() {
+    const L = this.p.listener;
+    const R = this.p.right;
+    this.earL[0] = L[0] - R[0] * EAR_OFFSET;
+    this.earL[1] = L[1] - R[1] * EAR_OFFSET;
+    this.earL[2] = L[2] - R[2] * EAR_OFFSET;
+    this.earR[0] = L[0] + R[0] * EAR_OFFSET;
+    this.earR[1] = L[1] + R[1] * EAR_OFFSET;
+    this.earR[2] = L[2] + R[2] * EAR_OFFSET;
+    this.updateWallMirrors();
+  }
+
+  /** Task 6: mirror both ears across each of the 6 wall planes of
+   *  [boundsMin, boundsMin+boundsSize], once at control rate (called
+   *  from updateEars, so every params ingestion that can move the
+   *  listener, the walls, or both keeps this current — never mid-grain).
+   *  Wall index w = 0..5 is (xmin,xmax,ymin,ymax,zmin,zmax); axis = w>>1,
+   *  and reflecting across an axis-aligned plane only changes that ONE
+   *  coordinate, so only one component of the mirrored point differs
+   *  from the real ear. See freezeImageRadii's doc comment for why
+   *  mirroring the EAR (here, cheaply, at control rate) stands in for
+   *  mirroring the GRAIN (which would otherwise have to happen fresh
+   *  every generation, for every budgeted voice).
+   *
+   *  Also computes `wallValidL`/`wallValidR`: a wall's reflection is
+   *  only physically sensible when the EAR sits on the room's interior
+   *  side of that wall's plane. Mirroring a plane with no wall-
+   *  intersection check (per the brief: "mirror across each wall
+   *  plane", full stop) is exact for an interior ear, but if the ear is
+   *  instead BEYOND the wall — as this file's own usual test listener
+   *  (0, 1.7, 4.4) sits beyond z=3, since boundsSize puts the box's z
+   *  range at [-3,3] — the same formula places the "image" on the
+   *  ear's own side, arbitrarily close to it (measured: an in-box
+   *  object at z=1.4 gives a z=3 "image" 0.22 m from that ear, CLOSER
+   *  than the object's own 3.0 m direct path — an echo that leads the
+   *  sound it echoes, which is not a reflection). A listener standing
+   *  behind a wall would hear no echo off it; this gate encodes exactly
+   *  that, at control-rate cost (one comparison per wall). */
+  updateWallMirrors() {
+    const bmin = this.p.boundsMin;
+    const bsize = this.p.boundsSize;
+    const L = this.earL;
+    const R = this.earR;
+    for (let w = 0; w < 6; w++) {
+      const axis = w >> 1;
+      const isMax = w & 1;
+      const c = isMax ? bmin[axis] + bsize[axis] : bmin[axis];
+      const mL = this.mirrorEarL[w];
+      const mR = this.mirrorEarR[w];
+      mL[0] = L[0]; mL[1] = L[1]; mL[2] = L[2];
+      mR[0] = R[0]; mR[1] = R[1]; mR[2] = R[2];
+      mL[axis] = 2 * c - L[axis];
+      mR[axis] = 2 * c - R[axis];
+      this.wallValidL[w] = (isMax ? L[axis] <= c : L[axis] >= c) ? 1 : 0;
+      this.wallValidR[w] = (isMax ? R[axis] <= c : R[axis] >= c) ? 1 : 0;
+    }
   }
 
   /** Score every pool voice's salience and mark the top heroCount in
@@ -376,6 +874,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
   selectHeroes() {
     const p = this.p;
     const K = Math.min(POOL, p.heroCount | 0);
+    const transport = !!p.transport;
     for (let k = 0; k < POOL; k++) {
       const capNow = this.scoreCapOn[k] ? 1 : 0;
       // a state flip is salient for ~300ms — single arrivals/departures
@@ -389,6 +888,16 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       if (capNow) s *= 1.5; // playing an instrument leans on heroes
       // hysteresis: current heroes keep a 1.25x advantage
       if (this.heroTarget[k] > 0) s *= 1.25;
+      // TRANSPORT eligibility: a voice whose grains the hero renderer
+      // would truncate unfaithfully (>1% arrival-tail energy — see
+      // heroEligible) must stay in the bed, which renders its arrival
+      // exactly. Without this, a far captured voice promoted to hero
+      // rendered SILENCE (dE ≥ its whole cycle) while bedG suppressed
+      // its bed share — the voice vanished from the mix. Zeroing the
+      // score keeps it out of the top-K; an already-promoted voice that
+      // drifts ineligible fades out on the normal 80ms ramp and the bed
+      // takes it back at (1 − heroGain).
+      if (transport && !this.scoreEligible[k]) s = 0;
       this.heroScore[k] = s;
     }
     // top-K by score (POOL=256: simple selection is fine at 94Hz)
@@ -413,6 +922,38 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     }
   }
 
+  /** TRANSPORT (Task 6): the per-hop salience budget for wall images —
+   *  any CURRENT hero OR this hop's top-IMAGE_TOP_K `scoreAmp` gets 6
+   *  echo splats; everyone else gets none (images are a decoration on
+   *  the loudest/most-attended voices, not a feature of every voice in
+   *  the 256-wide pool — the plan's throughput ledger notes images
+   *  multiply a budgeted voice's bed cost ×7, so the budget is what
+   *  keeps this affordable). Copies the top-K scan pattern from
+   *  selectHeroes, but scans `scoreAmp` directly rather than
+   *  `heroScore` (which folds in hysteresis/transition/capture bonuses
+   *  meant for the HERO decision, not this one) — reads are last hop's,
+   *  the SAME one-hop staleness selectHeroes already accepts (this
+   *  hop's fillBed, which would refresh scoreAmp, hasn't run yet).
+   *  Called once per hop, right after selectHeroes and before fillBed. */
+  computeImageBudget() {
+    this.imgTopMask.fill(0);
+    for (let pick = 0; pick < IMAGE_TOP_K; pick++) {
+      let best = -1;
+      let bestS = 0.0002;
+      for (let k = 0; k < POOL; k++) {
+        if (this.imgTopMask[k] === 0 && this.scoreAmp[k] > bestS) {
+          best = k;
+          bestS = this.scoreAmp[k];
+        }
+      }
+      if (best < 0) break;
+      this.imgTopMask[best] = 1;
+    }
+    for (let k = 0; k < POOL; k++) {
+      this.imageMask[k] = (this.isHero[k] || this.imgTopMask[k]) ? 1 : 0;
+    }
+  }
+
   /** Bed content for the hop starting at app-time tHop. Tasks 5-6 fill
    *  this with the pool; Task 4 ships a single test blob. */
   fillBed(tHop) {
@@ -432,6 +973,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const spat = this.bedSpat;
     const anyObjects = p.objects.some((o) => o && o.level > 0.001);
     const blockT = BLOCK / sampleRate;
+    // corpuscular transport: ON renders every burst's ARRIVAL per ear
+    // (delay rE/c, amplitude 1/max(rE, NEAR_CLAMP), no pan, no bassMono);
+    // OFF is the bit-sacred Stage-1 path (spatialize() gains, shared
+    // splat position) guarded by the null test vs granular-legacy.js.
+    const transport = !!p.transport;
+    const rr = this.bedREar; // [rL, rR] scratch for freezeRadii
     for (let k = 0; k < POOL; k++) {
       // complementary crossfade with the hero path: the bed renders this
       // voice at (1 − heroGain) while the hero loop renders it at
@@ -446,7 +993,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // 80ms ramp — accepted. A fully-promoted voice costs the bed
       // nothing (the continue below).
       const bedG = 1 - this.heroGain[k];
-      if (bedG <= 0.001) continue;
+      // Task 6: a fully-promoted voice (bedG ~ 0) still owes the bed its
+      // wall images — heroes never render their own reflections (see
+      // splatImageSplats), so `wantImages` alone must keep this voice's
+      // generations enumerated even when its DIRECT bed share is zero.
+      const wantImages = transport && this.imageMask[k] === 1;
+      if (bedG <= 0.001 && !wantImages) continue;
       const v = this.voices[k];
       // the bed derives into the voice's bed-owned struct, never into the
       // hero-rendered fields — fillBed's cursor runs ahead of the hero
@@ -475,10 +1027,33 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         // ingestion tau floor (0.0005s, mirroring the GPU clamp) the worst
         // real case is 21.33ms/0.0005 ≈ 43 cycles per block, so 128 is
         // ~3× margin over the floored minimum.
-        let gO = Math.floor(tHop * s.asgInvTau + s.asgPhi);
+        //
+        // TRANSPORT widening: a hop must consider cycles whose ARRIVAL
+        // may overlap it, so the emission enumeration extends back by
+        // DMAX + the burst length 0.6·tau; each ear then tests its own
+        // arrival window. Task 6 perf fix: only a voice THIS HOP's
+        // wantImages actually needs the wider (image-covering) lookback
+        // — everyone else only ever splats their direct path, which the
+        // original DMAX_DIRECT already covers in full, so widening their
+        // enumeration too was pure wasted freezeRadii/splat work (see
+        // DMAX_DIRECT's comment and IMAGE_AMP_SKIP's — this was the
+        // throughput ledger's dominant cost, bigger than images
+        // themselves). Widened worst case at the tau floor (budgeted
+        // voices only), recomputed for Task 6's DMAX 0.03 -> 0.09:
+        // (21.33ms + 90ms)/0.5ms + 0.6 ≈ 223.3 cycles → cap 672 (≈3×
+        // margin, matching the pre-Task-6 320/104 ≈ 3.08× ratio) — used
+        // unconditionally since it is only an emergency ceiling, and the
+        // ACTUAL iteration count is governed by lookCap (narrow for most
+        // voices, wide only for budgeted ones) long before it binds.
+        // lookCap is exactly 0 with transport off, so (tHop − lookCap)
+        // reduces bit-exactly to tHop and the Stage-1 enumeration is
+        // preserved verbatim.
+        let lookCap = transport ? (wantImages ? DMAX : DMAX_DIRECT) + 0.6 / s.asgInvTau : 0;
+        const iterCap = transport ? 672 : 128;
+        let gO = Math.floor((tHop - lookCap) * s.asgInvTau + s.asgPhi);
         let gOEnd = Math.floor(tEnd * s.asgInvTau + s.asgPhi);
         let iter = 0;
-        for (; gO <= gOEnd && ++iter <= 128; gO++) {
+        for (; gO <= gOEnd && ++iter <= iterCap; gO++) {
           if (gO !== s.asgGen) {
             // re-evaluate at the cycle's midpoint — the same reach/lottery
             // test the hero path runs at each cycle boundary
@@ -494,7 +1069,22 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             // selector (next task) promotes freshly-released voices to
             // sample-accurate heroes at exactly these transition moments,
             // covering the audible surface. See task-6-report.md.
-            if (!s.capOn) break;
+            //
+            // TRANSPORT: the widened enumeration visits cycles up to
+            // 30ms+burst in the past, and any one of them may simply
+            // have lost its per-cycle claim lottery while the voice IS
+            // captured at tHop — a break here would then silence real
+            // later cycles for the whole hop. Skip just that cycle:
+            // restore the assignment slot (evaluateCapture cleared it;
+            // asgInvTau/asgPhi/asgGen are untouched on a failed pick)
+            // so the next iteration re-evaluates on the same scheme.
+            // The off path keeps its documented break (≤1-block gap at
+            // the release instant, mitigated by the hero selector).
+            if (!s.capOn) {
+              if (!transport) break;
+              s.asg = prevAsg;
+              continue;
+            }
             if (s.asg !== prevAsg || s.asgInvTau !== prevInvTau || s.asgPhi !== prevPhi) {
               // mid-block HANDOFF: the voice now belongs to an object with
               // a different cycle scheme. Rebase counter, bounds and the
@@ -504,7 +1094,14 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
               // on the new scheme's first cycle.
               o = p.objects[s.asg];
               wCap = (Math.sqrt(W) + (W - Math.sqrt(W)) * o.sync) * p.objectGain;
-              const tCursor = Math.max(tHop, (gO - prevPhi) / prevInvTau);
+              // transport: the new scheme's lookback replaces the old
+              // one's (new tau → new burst length); 0 when off, so the
+              // off-path rebase arithmetic is bit-identical. Same
+              // wantImages-gated DMAX/DMAX_DIRECT choice as the loop's
+              // initial lookCap above (wantImages is per-VOICE this hop,
+              // unaffected by which object it's handed off to).
+              lookCap = transport ? (wantImages ? DMAX : DMAX_DIRECT) + 0.6 / s.asgInvTau : 0;
+              const tCursor = Math.max(tHop - lookCap, (gO - prevPhi) / prevInvTau);
               gO = Math.floor(tCursor * s.asgInvTau + s.asgPhi) - 1;
               gOEnd = Math.floor(tEnd * s.asgInvTau + s.asgPhi);
               continue;
@@ -515,6 +1112,56 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           const bStart = cycStart;
           const bLen = 0.6 * cycLen; // duty 0.6, matching the hero path's
           // aa = (xO - asgGen) / 0.6
+
+          if (transport) {
+            // per-ear arrival: one splat into each ear's tile, with the
+            // ear's own delay, amplitude 1/max(rE, NEAR_CLAMP) (true
+            // spreading; bassBoost stays inside capAmp0 — it is
+            // emission-side loudness calibration), and NO pan/bassMono —
+            // each ear receives the full pressure of the wave, as in
+            // air. rL/rR are FROZEN per (voice, generation, ear) at the
+            // cycle's first consideration (freezeRadii), so a grain in
+            // flight never bends when the listener moves. Anchor is the
+            // same closed-form cycle anchor the off path splats with;
+            // the helper shifts it by the flight time (see
+            // splatBurstArrival's derivation). Doppler (Task 5): dopL/dopR
+            // = 1 − rdot/c, frozen in the SAME freezeRadii call above.
+            this.freezeRadii(TL_CAP, k, gO, gO * 16 + s.asg + 2, s.px, s.py, s.pz, rr);
+            const anchor = Math.ceil(cycStart * sampleRate) / sampleRate;
+            const envO = this.objEnvLUT[s.asg] || this.envLUT;
+            // emission loudness BEFORE the hero-crossfade complement —
+            // images (below) never carry bedG (see splatImageSplats)
+            const emitBase = s.capAmp0 * wCap;
+            if (bedG > 0.001) {
+              const base = emitBase * bedG;
+              const dopL = 1 - rr[2] / SPEED_OF_SOUND;
+              const dopR = 1 - rr[3] / SPEED_OF_SOUND;
+              const sL = this.splatBurstArrival(
+                this.bedReL, this.bedImL, tHop, tEnd, bStart, bLen,
+                rr[0] / SPEED_OF_SOUND, rr[0], anchor, s.capFreq, dopL,
+                base / Math.max(rr[0], NEAR_CLAMP),
+                envO, s.capSat, s.capTableA, s.capTableB, s.capTableFrac, 0.0002,
+              );
+              const sR = this.splatBurstArrival(
+                this.bedReR, this.bedImR, tHop, tEnd, bStart, bLen,
+                rr[1] / SPEED_OF_SOUND, rr[1], anchor, s.capFreq, dopR,
+                base / Math.max(rr[1], NEAR_CLAMP),
+                envO, s.capSat, s.capTableA, s.capTableB, s.capTableFrac, 0.0002,
+              );
+              if (sL || sR) sounding = true;
+            }
+            // Task 6: the walls answer — 6 first-order image splats,
+            // budgeted (imageMask), bed-only, never crossfaded by bedG
+            if (wantImages) {
+              const sI = this.splatImageSplats(
+                k, gO, s.asg + 2, s.px, s.py, s.pz, tHop, tEnd, bStart, bLen,
+                anchor, s.capFreq, emitBase, envO, s.capSat,
+                s.capTableA, s.capTableB, s.capTableFrac,
+              );
+              if (sI) sounding = true;
+            }
+            continue;
+          }
 
           // same Gabor-true two-regime rendering as the free path below:
           // a short burst IS a grain — one designated-hop splat carrying
@@ -605,20 +1252,73 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         // design) — it must not read hero-owned Voice state for this voice
         this.scoreCapOn[k] = s.capOn;
         this.scoreAmp[k] = s.capOn ? s.capAmp : s.amp;
+        this.scoreEligible[k] = transport ? this.heroEligible(k, s) : 1;
         continue; // captured: skip the free-burst section
       }
 
       const invLFree = (1 / p.tau) / (v.slotJitter * 1.8);
-      // every free generation whose burst overlaps this block
-      let g = Math.floor(tHop * invLFree + v.phi);
+      // every free generation whose burst overlaps this block — in
+      // transport mode, whose burst's ARRIVAL may overlap it: the burst
+      // lives inside its slot and arrives ≤ DMAX late, so looking back
+      // by DMAX + the max burst length 0.75·slotLen covers every
+      // candidate (per-ear arrival windows do the exact test). Task 6
+      // perf fix: only widen to DMAX for a voice this hop's wantImages
+      // — everyone else's direct arrival only ever needs DMAX_DIRECT
+      // (see that constant's comment; this is the same narrowing the
+      // captured branch above applies, for the same reason). lookFree
+      // is exactly 0 with transport off — the Stage-1 enumeration
+      // arithmetic is preserved bit-exactly.
+      const lookFree = transport ? (wantImages ? DMAX : DMAX_DIRECT) + 0.75 / invLFree : 0;
+      let g = Math.floor((tHop - lookFree) * invLFree + v.phi);
       const gEnd = Math.floor(tEnd * invLFree + v.phi);
       for (; g <= gEnd; g++) {
         if (g !== s.gen) this.refreshFreeGeneration(v, g, spat, s);
-        if (s.amp <= 0.0002) continue;
+        if ((transport ? s.amp0 : s.amp) <= 0.0002) continue;
         const slotStart = (g - v.phi) / invLFree;
         const slotLen = 1 / invLFree;
         const bStart = slotStart + s.offN * slotLen;
         const bLen = s.durN * slotLen;
+        if (transport) {
+          // per-ear arrival for the free mass — same contract as the
+          // captured transport block above: frozen radii per (voice,
+          // generation, ear), 1/max(rE, NEAR_CLAMP) amplitude, no pan,
+          // no bassMono; the slot anchor travels with the grain. Doppler
+          // (Task 5): dopL/dopR = 1 − rdot/c, frozen in the SAME call.
+          this.freezeRadii(TL_FREE, k, g, g * 16 + 1, s.fx, s.fy, s.fz, rr);
+          const anchor = Math.ceil(slotStart * sampleRate) / sampleRate;
+          // emission loudness BEFORE the hero-crossfade complement —
+          // images (below) never carry bedG (see splatImageSplats)
+          const emitBase = s.amp0 * wFree;
+          if (bedG > 0.001) {
+            const base = emitBase * bedG;
+            const dopL = 1 - rr[2] / SPEED_OF_SOUND;
+            const dopR = 1 - rr[3] / SPEED_OF_SOUND;
+            const sL = this.splatBurstArrival(
+              this.bedReL, this.bedImL, tHop, tEnd, bStart, bLen,
+              rr[0] / SPEED_OF_SOUND, rr[0], anchor, s.freeFreq, dopL,
+              base / Math.max(rr[0], NEAR_CLAMP),
+              this.envLUT, s.freeSat, s.freeTableA, s.freeTableB, s.freeTableFrac, 0.0002,
+            );
+            const sR = this.splatBurstArrival(
+              this.bedReR, this.bedImR, tHop, tEnd, bStart, bLen,
+              rr[1] / SPEED_OF_SOUND, rr[1], anchor, s.freeFreq, dopR,
+              base / Math.max(rr[1], NEAR_CLAMP),
+              this.envLUT, s.freeSat, s.freeTableA, s.freeTableB, s.freeTableFrac, 0.0002,
+            );
+            if (sL || sR) sounding = true;
+          }
+          // Task 6: the walls answer — 6 first-order image splats,
+          // budgeted (imageMask), bed-only, never crossfaded by bedG
+          if (wantImages) {
+            const sI = this.splatImageSplats(
+              k, g, 1, s.fx, s.fy, s.fz, tHop, tEnd, bStart, bLen, anchor,
+              s.freeFreq, emitBase, this.envLUT, s.freeSat,
+              s.freeTableA, s.freeTableB, s.freeTableFrac,
+            );
+            if (sI) sounding = true;
+          }
+          continue;
+        }
         // Gabor-true rendering, two regimes by burst duration:
         //
         // SHORT burst (fits inside one analysis window): the burst IS a
@@ -751,11 +1451,518 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // scoring inputs for selectHeroes, free-path shape (capOn is 0 here)
       this.scoreCapOn[k] = 0;
       this.scoreAmp[k] = s.amp;
+      this.scoreEligible[k] = transport ? this.heroEligible(k, s) : 1;
     }
+  }
+
+  /** TRANSPORT: per-ear ranges rL/rR from a grain's emission point,
+   *  FROZEN per (voice k, generation g, ear) — the foreign-clock rule
+   *  for propagation. The first hop that considers a generation computes
+   *  both ranges from the CURRENT earL/earR and freezes them in a
+   *  per-voice generation ring; every later hop that revisits the same
+   *  generation (a grain still in flight) reuses the frozen values even
+   *  if the listener has moved since — control-rate listener updates
+   *  take effect at natural births, and a grain never bends mid-flight.
+   *
+   *  `tl` routes to the timeline's OWN ring (TL_FREE/TL_CAP — every
+   *  call site knows which timeline it is freezing); `tag` uniquely
+   *  encodes (generation, timeline): g·16 + slot + 2, slot = −1 for the
+   *  free timeline, the object slot (0..7) for captured — exact in a
+   *  double far beyond any session length (|g|·16 ≪ 2^53). Ring slot =
+   *  g mod TRANSPORT_RING[tl]; each ring is sized so two of ITS OWN
+   *  generations live in one hop's widened window can never share a
+   *  slot (see the TRANSPORT_RING comment — cross-timeline sharing is
+   *  what the per-timeline split removed), and a stale tag simply
+   *  recomputes. Writes [rL, rR, rdotL, rdotR] into `out`; no
+   *  allocation.
+   *
+   *  Doppler (Task 5): rdotE = −dot(unit(grainPos − earE), listenerVel) is
+   *  the range rate dr/dt at THIS SAME freeze instant (negative while
+   *  approaching) — frozen alongside rE per the shared-formula spec, so a
+   *  grain's received pitch never bends mid-flight any more than its
+   *  delay does.
+   *
+   *  Stage-2 note: on the GPU this whole cache disappears — the splat
+   *  shader computes the same two distances (and range rates) per grain
+   *  from the frozen per-generation ear uniform, closed-form and
+   *  state-free. */
+  freezeRadii(tl, k, g, tag, x, y, z, out) {
+    const N = TRANSPORT_RING[tl];
+    const idx = k * N + (((g % N) + N) % N);
+    const tagRing = this.bedRTag[tl];
+    if (tagRing[idx] === tag) {
+      out[0] = this.bedRL[tl][idx];
+      out[1] = this.bedRR[tl][idx];
+      out[2] = this.bedRdotL[tl][idx];
+      out[3] = this.bedRdotR[tl][idx];
+      return;
+    }
+    // determinism sentinel (see the constructor's frozenRecomputes
+    // comment): an eviction that crosses timeline classes is a frozen
+    // grain recomputed against a foreign clock — count it. With
+    // per-timeline rings this can never fire (each ring only receives
+    // its own class); the sentinel test asserts exactly that.
+    const old = tagRing[idx];
+    if (old === old
+      && ((((old % 16) + 16) % 16) === 1) !== ((((tag % 16) + 16) % 16) === 1)) {
+      this.frozenRecomputes++;
+    }
+    const eL = this.earL;
+    const eR = this.earR;
+    const lv = this.p.listenerVel;
+    let dx = x - eL[0];
+    let dy = y - eL[1];
+    let dz = z - eL[2];
+    const rL = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const rdotL = rL > 1e-6 ? -(dx * lv[0] + dy * lv[1] + dz * lv[2]) / rL : 0;
+    dx = x - eR[0];
+    dy = y - eR[1];
+    dz = z - eR[2];
+    const rR = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const rdotR = rR > 1e-6 ? -(dx * lv[0] + dy * lv[1] + dz * lv[2]) / rR : 0;
+    tagRing[idx] = tag;
+    this.bedRL[tl][idx] = rL;
+    this.bedRR[tl][idx] = rR;
+    this.bedRdotL[tl][idx] = rdotL;
+    this.bedRdotR[tl][idx] = rdotR;
+    out[0] = rL;
+    out[1] = rR;
+    out[2] = rdotL;
+    out[3] = rdotR;
+  }
+
+  /** TRANSPORT (Task 6): 6 first-order wall-image ranges/range-rates,
+   *  per ear, FROZEN per (voice k, generation g) — the SAME
+   *  foreign-clock contract as freezeRadii: an echo must not bend
+   *  mid-flight any more than the direct sound does. Its own rings
+   *  (bedIRL/bedIRR/bedIRdotL/bedIRdotR × 6 walls × 2 timelines, one
+   *  shared bedITag per timeline — `tl` routes exactly as in
+   *  freezeRadii) rather than widening freezeRadii's, since this is
+   *  only ever called for BUDGETED voices — a small,
+   *  hop-to-hop-changing subset of POOL (see splatImageSplats /
+   *  computeImageBudget).
+   *
+   *  Distance: for wall w the image source is the grain mirrored across
+   *  that wall's plane, and d(image, earE) = d(grain, mirror(earE))
+   *  because a wall reflection is an isometry and its own inverse:
+   *  writing M for the reflection, d(M(grain), earE) = d(grain,
+   *  M^-1(earE)) = d(grain, M(earE)) since M = M^-1 (reflecting twice is
+   *  the identity). So instead of mirroring the GRAIN every generation,
+   *  this reads the EAR already mirrored once at control rate
+   *  (updateWallMirrors, called from updateEars) and measures from the
+   *  grain's own frozen, UNMIRRORED (x,y,z) — cheaper, and exactly the
+   *  "mirrored listener" trick the plan calls for.
+   *
+   *  Range rate: differentiating d(grain, mirrorEar(t)) with respect to
+   *  the ear's REAL motion gives -dot(unit(grain - mirrorEar),
+   *  d(mirrorEar)/dt); the reflection M is linear (up to translation),
+   *  so d(mirrorEar)/dt is listenerVel with the wall's normal-axis
+   *  component NEGATED (the two tangential components move with the
+   *  ear unchanged) — the mirrored-velocity half of the same trick,
+   *  computed inline per wall (one sign flip) rather than cached, since
+   *  it is cheaper than the position mirror it rides alongside.
+   *
+   *  Wall VALIDITY is frozen here too (fix round — foreign-clock):
+   *  which walls an ear may hear (updateWallMirrors' wallValidL/R) is
+   *  read at the freeze instant, packed into bedIValid (bit w = ear L
+   *  hears wall w, bit w+6 = ear R), and returned; splatImageSplats
+   *  renders from the RETURNED frozen mask, never the live flags. A
+   *  live read would let a control-rate listener plane-crossing flip a
+   *  wall "valid" mid-generation whose radii this method (which skips
+   *  invalid walls' geometry, below) never computed — the revisit would
+   *  then read a stale/zeroed ring slot as rImg≈0: a zero-delay,
+   *  1/NEAR_CLAMP-amplitude spurious blob. Frozen validity is also the
+   *  physically right call, not just the safe one: an echo is part of
+   *  the grain's frozen propagation geometry — it must not appear (or
+   *  vanish) mid-flight any more than the grain's delay may bend.
+   *
+   *  Writes up to 24 floats into `out` (only walls with a set validity
+   *  bit are written — unwritten slots are stale and must not be read;
+   *  the caller's mask gate guarantees that): out[w*4 + {0:rL, 1:rR,
+   *  2:rdotL, 3:rdotR}] for wall w = 0..5. Returns the packed validity
+   *  mask. No allocation. */
+  freezeImageRadii(tl, k, g, tag, x, y, z, out) {
+    const N = TRANSPORT_RING[tl];
+    const idx = k * N + (((g % N) + N) % N);
+    const tagRing = this.bedITag[tl];
+    const iRL = this.bedIRL[tl];
+    const iRR = this.bedIRR[tl];
+    const iRdotL = this.bedIRdotL[tl];
+    const iRdotR = this.bedIRdotR[tl];
+    if (tagRing[idx] === tag) {
+      const vm = this.bedIValid[tl][idx];
+      for (let w = 0; w < 6; w++) {
+        if ((vm & (0x41 << w)) === 0) continue; // neither ear: never written
+        out[w * 4] = iRL[w][idx];
+        out[w * 4 + 1] = iRR[w][idx];
+        out[w * 4 + 2] = iRdotL[w][idx];
+        out[w * 4 + 3] = iRdotR[w][idx];
+      }
+      return vm;
+    }
+    // determinism sentinel — same check as freezeRadii's (the image
+    // rings shared the identical cross-timeline collision pre-split)
+    const old = tagRing[idx];
+    if (old === old
+      && ((((old % 16) + 16) % 16) === 1) !== ((((tag % 16) + 16) % 16) === 1)) {
+      this.frozenRecomputes++;
+    }
+    const lv = this.p.listenerVel;
+    tagRing[idx] = tag;
+    let vm = 0;
+    for (let w = 0; w < 6; w++) {
+      // Task 6 perf: a wall neither ear can validly hear from AT THE
+      // FREEZE INSTANT is never rendered for this generation (frozen
+      // mask above) — skip its geometry too, not just its splat. Common
+      // case: the file's usual out-of-box listener invalidates exactly
+      // one wall.
+      const vL = this.wallValidL[w];
+      const vR = this.wallValidR[w];
+      if (!vL && !vR) continue;
+      vm |= (vL ? 1 << w : 0) | (vR ? 1 << (w + 6) : 0);
+      const axis = w >> 1;
+      const mvx = axis === 0 ? -lv[0] : lv[0];
+      const mvy = axis === 1 ? -lv[1] : lv[1];
+      const mvz = axis === 2 ? -lv[2] : lv[2];
+      const mEarL = this.mirrorEarL[w];
+      let dx = x - mEarL[0]; let dy = y - mEarL[1]; let dz = z - mEarL[2];
+      const rL = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const rdotL = rL > 1e-6 ? -(dx * mvx + dy * mvy + dz * mvz) / rL : 0;
+      const mEarR = this.mirrorEarR[w];
+      dx = x - mEarR[0]; dy = y - mEarR[1]; dz = z - mEarR[2];
+      const rR = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const rdotR = rR > 1e-6 ? -(dx * mvx + dy * mvy + dz * mvz) / rR : 0;
+      iRL[w][idx] = rL; iRR[w][idx] = rR;
+      iRdotL[w][idx] = rdotL; iRdotR[w][idx] = rdotR;
+      out[w * 4] = rL; out[w * 4 + 1] = rR;
+      out[w * 4 + 2] = rdotL; out[w * 4 + 3] = rdotR;
+    }
+    this.bedIValid[tl][idx] = vm;
+    return vm;
+  }
+
+  /** TRANSPORT (Task 4): air absorption gain exp(-AIR_COEF·f²·r), read
+   *  from the 2D LUT baked in the constructor — no Math.exp/Math.pow
+   *  here, ever. Frequency: nearest ¼-octave bucket (round-log2-and-
+   *  clamp — the SAME bucketing PATTERN as GRAIN_BUCKETS' duration
+   *  index, reused for a different axis). r: linearly interpolated
+   *  between the two bracketing log-spaced LUT steps, since r is what
+   *  actually moves audibly hop to hop; a bucket seam in f sits inside
+   *  one critical band and is not a resolution a listener has.
+   *  Math.log/Math.log2 below run at BLOCK rate (once per bed grain or
+   *  once per hero voice per audio quantum) — the same cost class as
+   *  the existing `Math.round(Math.log2(bLen*sampleRate))` grain-
+   *  duration bucketing already in this file, not the banned per-hop
+   *  Math.pow/Math.exp. */
+  airGain(freq, r) {
+    let fi = Math.round(Math.log2(Math.max(freq, AIR_F_MIN)) * AIR_F_BUCKETS_PER_OCT) - this.airFLog2Min;
+    if (fi < 0) fi = 0;
+    else if (fi >= this.airFBuckets) fi = this.airFBuckets - 1;
+    const rc = r < AIR_R_MIN ? AIR_R_MIN : (r > AIR_R_MAX ? AIR_R_MAX : r);
+    const rt = (Math.log(rc / AIR_R_MIN) / this.airRLogRatio) * (AIR_R_STEPS - 1);
+    let ri = rt | 0;
+    if (ri >= AIR_R_STEPS - 1) ri = AIR_R_STEPS - 2;
+    const frac = rt - ri;
+    const base = fi * AIR_R_STEPS + ri;
+    return this.airGainLUT[base] * (1 - frac) + this.airGainLUT[base + 1] * frac;
+  }
+
+  /** TRANSPORT: may this voice be a hero right now? 1 if the hero
+   *  renderer would be FAITHFUL to it, 0 if it must stay in the bed.
+   *
+   *  The hero loop advances generations on the emission clock, so it
+   *  truncates the part of a grain whose ARRIVAL crosses the next
+   *  generation boundary (dropped duration = max(0, dE − trailing gap)).
+   *  A voice is eligible only while that truncation carries ≤1% of the
+   *  burst's energy: dE ≤ gap + (1 − tail01)·burstLen, with tail01 baked
+   *  per envelope LUT (bakeEnv) and dE = max(dL, dR) read through the
+   *  SAME freezeRadii ring the renderers use (frozen geometry — the
+   *  mask can never disagree with what would actually render).
+   *
+   *  Why exclusion is the right fix (not hero-side arrival enumeration,
+   *  which is Stage 2's stateless splat): physics already imposes ≥ dE
+   *  of flight latency on a far source, and dE exceeds the bed's block
+   *  latency at exactly the distances where the hero renderer becomes
+   *  unfaithful — the hero's zero-latency advantage is void there, so
+   *  bed rendering is both exact AND latency-equivalent. Interaction /
+   *  transition salience remains served for near sources, which is
+   *  where individual grains are resolvable anyway.
+   *
+   *  Called at scoring-record time (block rate, by whichever renderer
+   *  owns the voice), never per sample. `s` is the owner's derivation
+   *  struct (the Voice on the hero path, `v.bed` on the bed path). */
+  heroEligible(k, s) {
+    const rr = this.bedREar;
+    let allowed;
+    if (s.capOn) {
+      this.freezeRadii(TL_CAP, k, s.asgGen, s.asgGen * 16 + s.asg + 2, s.px, s.py, s.pz, rr);
+      const tail01 = (this.objEnvLUT[s.asg] || this.envLUT).tail01;
+      // cycle: burst 0.6·cycLen, trailing gap 0.4·cycLen
+      allowed = (0.4 + 0.6 * (1 - tail01)) / s.asgInvTau;
+    } else {
+      this.freezeRadii(TL_FREE, k, s.gen, s.gen * 16 + 1, s.fx, s.fy, s.fz, rr);
+      // slot: burst durN·slotLen at offset offN·slotLen — exact
+      // CURRENT-generation values, not a distribution worst-case
+      const slotLen = this.p.tau * (this.voices[k].slotJitter * 1.8);
+      allowed = ((1 - s.offN - s.durN) + s.durN * (1 - this.envLUT.tail01)) * slotLen;
+    }
+    return Math.max(rr[0], rr[1]) / SPEED_OF_SOUND <= allowed ? 1 : 0;
+  }
+
+  /** TRANSPORT: splat one emitted burst into ONE ear's tile at its
+   *  arrival time. This is the whole phase algebra of corpuscular
+   *  transport, so here is the derivation:
+   *
+   *  The ear receives the emitted wave at retarded time,
+   *      y_ear(t) = A(rE) · y_emit(t − dE),        dE = rE / c,
+   *  with dE frozen for the grain's lifetime (freezeRadii). The emitted
+   *  carrier is the slot/cycle-anchored closed form of the per-sample
+   *  engine, sin(2πf·(t_emit − anchor)), so
+   *      y_ear(t) = A · sin(2πf·((t − dE) − anchor))
+   *               = A · sin(2πf·(t − (anchor + dE)))
+   *  — the received tone is the SAME anchored oscillator with its
+   *  anchor displaced by the flight time: anchorE = anchor + dE. The
+   *  envelope rides the same retarded clock, env((t − dE − bStart)/bLen),
+   *  so the burst window, the designated-hop/mid-strip test, the splat
+   *  `shift`, and every carrier (fundamental and partials alike, each at
+   *  h·f on the same anchorE) translate rigidly by dE: time-of-flight is
+   *  a translation of the whole grain, never a distortion of it. Two
+   *  ears get two translations of one emission — ITD, per-ear
+   *  interference and combs are corollaries, not features.
+   *
+   *  `amp0` carries emission loudness × weights × bedG ×
+   *  1/max(rE, NEAR_CLAMP); this helper adds only the envelope/COLA/
+   *  calibration terms — the SAME ones the transport-off path applies
+   *  (envSegRMS, √2, √overlap, GRAIN_COLA, BED_CAL, duration-bucketed
+   *  grain kernels), so one BED_CAL keeps calibrating both modes.
+   *
+   *  Air absorption (Task 4) rides along here too: the fundamental and
+   *  EACH partial gets its own `airGain(hFreq, rE)` lookup (a LUT read,
+   *  not Math.exp) — a grain's spectrum doesn't dim as one block, its
+   *  highs die faster than its lows, exactly like the emitted anchor
+   *  above translates the WHOLE spectrum rigidly by dE while absorption
+   *  shapes each partial's amplitude independently.
+   *
+   *  Doppler (Task 5): with a MOVING listener the retarded delay is not
+   *  constant across the grain's lifetime. `dopplerMul` = 1 − rdot/c is
+   *  frozen alongside dE/rE (freezeRadii) from the range rate rdot at the
+   *  SAME freeze instant. Linearizing the retarded delay around that
+   *  instant, d(t) ≈ dE + (rdot/c)·(t − anchor), and substituting into the
+   *  emitted closed form y_emit(t) = sin(2πf·(t − anchor)) gives
+   *      y_ear(t) = sin(2πf·(t − d(t) − anchor))
+   *               ≈ sin(2πf·(1 − rdot/c)·(t − anchor − dE))
+   *               = sin(2πfE·(t − anchorE)),   fE = f·(1 − rdot/c)
+   *  — to first order in rdot/c, the moving-listener grain is the SAME
+   *  closed form as the static case with the carrier (fundamental AND
+   *  each partial h·f) replaced by fE everywhere it drives PHASE (bin,
+   *  ph, php below); anchorE, dE and the envelope's retarded clock are
+   *  UNCHANGED — Doppler bends perceived pitch, not arrival timing. This
+   *  is the same order of approximation the frozen-rE contract already
+   *  makes: honest for grains ≤100ms at listener speeds ≤20 m/s (worst-
+   *  case intra-grain error ~0.6%, per the plan's bound). Air absorption
+   *  stays on the TRUE (unshifted) frequency passed in as `freq`/`hFreq`:
+   *  physically the wave travels the medium at its emitted frequency —
+   *  the shift is a receiver-side artifact of relative motion, not a
+   *  change in what interacts with the air along the path.
+   *  `ampSkip` is the post-envelope amplitude floor below which nothing
+   *  splats — 0.0002 for the direct-path callers (the plan's global
+   *  splat floor), raised to IMAGE_AMP_SKIP for image callers only (Task
+   *  6's throughput ledger: images cost ×6 splat calls per budgeted
+   *  voice, so a higher floor there trims the quietest reflections
+   *  before they reach the FFT/blob work below — see splatImageSplats).
+   *  Precisely: the check tests amp AFTER envelope/COLA/BED_CAL (and
+   *  the caller's REFL_COEF/1/r, folded into amp0) but BEFORE the
+   *  airGain and fc factors applied at the splat sites below — both
+   *  ≤ 1, so the check is permissive (under-skip only): nothing that
+   *  would have cleared the floor is ever wrongly dropped.
+   *
+   *  Returns true if anything was splatted (the caller's `sounding`).
+   *  Block-rate; no allocation, no pow, no per-sample trig. */
+  splatBurstArrival(re, im, tHop, tEnd, bStart, bLen, dE, rE, anchor, freq, dopplerMul, amp0,
+    envO, sat, tableA, tableB, tf, ampSkip) {
+    const blockT = BLOCK / sampleRate;
+    const bStartE = bStart + dE; // the arrival window is the emission
+    // window translated by the flight time: [bStart + dE, bStart + bLen + dE]
+    let amp;
+    let gker;
+    let shift = 0;
+    if (bLen < blockT) {
+      // short burst = one grain: single designated-hop splat, the
+      // mid-strip test now applied to the ARRIVAL midpoint
+      const pc = (bStartE + bLen / 2 - tHop) * sampleRate;
+      if (pc < HOP / 2 || pc >= HOP / 2 + HOP) return false;
+      const envRMS = OceanTwinProcessor.envSegRMS(envO, 0, 1);
+      amp = amp0 * envRMS * Math.SQRT2
+        * Math.sqrt(bLen / blockT) * GRAIN_COLA * BED_CAL;
+      let bi = Math.round(Math.log2(bLen * sampleRate)) - GRAIN_LOG2_MIN;
+      if (bi < 0) bi = 0;
+      else if (bi >= GRAIN_BUCKETS.length) bi = GRAIN_BUCKETS.length - 1;
+      gker = this.grainKers[bi];
+      shift = pc - BLOCK / 2;
+    } else {
+      // long burst: interior hops window-limited with COLA, edge slices
+      // as grains of the overlap's duration — all clocks arrival-shifted
+      const s0 = Math.max(bStartE, tHop);
+      const s1 = Math.min(bStartE + bLen, tEnd);
+      if (s1 <= s0) return false;
+      const a0 = (s0 - bStartE) / bLen;
+      const a1 = (s1 - bStartE) / bLen;
+      const envRMS = OceanTwinProcessor.envSegRMS(envO, a0, a1);
+      const overlap = (s1 - s0) / blockT;
+      amp = amp0 * envRMS * Math.SQRT2 * Math.sqrt(overlap) * BED_CAL;
+      if (bStartE <= tHop && bStartE + bLen >= tEnd) {
+        gker = this.ker; // interior hop: window-limited, COLA carries env
+      } else {
+        let bi = Math.round(Math.log2((s1 - s0) * sampleRate)) - GRAIN_LOG2_MIN;
+        if (bi < 0) bi = 0;
+        else if (bi >= GRAIN_BUCKETS.length) bi = GRAIN_BUCKETS.length - 1;
+        gker = this.grainKers[bi];
+        const pc = ((s0 + s1) / 2 - tHop) * sampleRate;
+        shift = pc - BLOCK / 2;
+        amp *= this.win[Math.min(BLOCK - 1, pc | 0)] * GRAIN_COLA;
+      }
+    }
+    if (amp <= ampSkip) return false;
+    const anchorE = anchor + dE;
+    // Doppler (Task 5): fE = f·dopplerMul drives bin/phase; absorption
+    // below stays on the true `freq`/`hFreq` (see this method's doc
+    // comment for the derivation).
+    const freqE = freq * dopplerMul;
+    const bin = (freqE * BLOCK) / sampleRate;
+    const ph = (2 * Math.PI * freqE * (tHop - anchorE) - Math.PI / 2) % (2 * Math.PI);
+    // same two-wavetable 1/peak blend as the off path
+    const invPA = this.wheelInvPeak[tableA];
+    const invPB = this.wheelInvPeak[tableB];
+    const fc = (1 - sat) + sat * ((1 - tf) * invPA + tf * invPB);
+    const airFund = this.airGain(freq, rE);
+    splatBlob(re, im, BLOCK, bin, amp * fc * airFund, ph, gker, shift);
+    if (sat > 0.01) {
+      for (let side = 0; side < 2; side++) {
+        const rec = RECIPES[side === 0 ? tableA : tableB];
+        const w = sat * (side === 0 ? (1 - tf) * invPA : tf * invPB);
+        for (let q = 1; q < rec.length; q++) { // q=0 is the fundamental
+          const [hh, ha] = rec[q];
+          const hFreq = freq * hh; // true partial frequency — absorption axis
+          const fb = (hFreq * dopplerMul * BLOCK) / sampleRate;
+          if (fb >= BLOCK / 2 - KERNEL_HW) break;
+          const pa = amp * w * ha;
+          if (pa <= 0.000002) continue;
+          // partial h rides the SAME displaced anchor: the whole
+          // spectrum of the grain arrives together, but each partial's
+          // OWN frequency (freq·hh) gets its own absorption lookup —
+          // highs really do die faster than lows within one grain — AND
+          // its own Doppler-shifted phase (hFreq·dopplerMul), consistent
+          // with the fundamental above
+          const php = (2 * Math.PI * hFreq * dopplerMul * (tHop - anchorE) - Math.PI / 2) % (2 * Math.PI);
+          splatBlob(re, im, BLOCK, fb, pa * this.airGain(hFreq, rE), php, gker, shift);
+        }
+      }
+    }
+    return true;
+  }
+
+  /** TRANSPORT (Task 6): the walls answer. Splats 6 more per-ear
+   *  arrivals for ONE emitted burst — one first-order image per wall of
+   *  [boundsMin, boundsMin+boundsSize] — reusing splatBurstArrival
+   *  UNCHANGED (an image is just another receiver-side translation of
+   *  the same emitted closed form, exactly like the direct L/R splats
+   *  it sits beside: only dE/rE/dopplerMul differ, computed by
+   *  freezeImageRadii).
+   *
+   *  `base` is the emission loudness (capAmp0/amp0 × the sync-scaled
+   *  weight) WITHOUT the bed's (1 − heroGain) crossfade complement:
+   *  heroes render their OWN direct path per-sample and never render
+   *  their own reflections (the hero loop in process() has no wall-
+   *  image code at all), so an image is the bed's to draw alone
+   *  regardless of a voice's hero/bed split — multiplying by bedG here
+   *  would silently mute a promoted voice's echo exactly when it is
+   *  loudest (heroGain -> 1, bedG -> 0). This is also why fillBed must
+   *  keep enumerating a fully-promoted voice's generations at all: see
+   *  the `wantImages` guard next to its `bedG <= 0.001` skip.
+   *
+   *  Only called for BUDGETED voices (`imageMask` — any current hero OR
+   *  this hop's top-IMAGE_TOP_K `scoreAmp`, computeImageBudget): the ×6
+   *  splats multiply a voice's bed cost, so the salience gate is what
+   *  keeps this affordable (see the plan's throughput ledger).
+   *
+   *  Per-wall amplitude: REFL_COEF × base / max(rImg, NEAR_CLAMP) — one
+   *  reflection loses REFL_COEF of its energy at the wall, then spreads
+   *  1/r from the (farther) image point same as any other source.
+   *  Absorption and delay both use the TRUE rImg (via splatBurstArrival's
+   *  rE/dE params); the skip is splatBurstArrival's own existing check,
+   *  applied after envelope/COLA/BED_CAL/REFL_COEF/1/r but BEFORE the
+   *  per-partial airGain and the fc wavetable-blend factor — both of
+   *  which are ≤ 1 (absorption only attenuates; fc blends peak-
+   *  normalized tables), so the check is PERMISSIVE: it may let through
+   *  a splat those last factors then push under the floor, but can
+   *  never wrongly drop one that would have cleared it — the same
+   *  under-skip-only bound the hero fast paths use. Here the floor is
+   *  IMAGE_AMP_SKIP, not the direct path's 2e-4 (see splatBurstArrival's
+   *  `ampSkip` param and IMAGE_AMP_SKIP's own comment: measured to be
+   *  needed both for throughput and because a reflection's own Doppler/
+   *  absorption geometry differs from the direct path's, and a too-
+   *  generous floor let quiet, differently-shifted reflections
+   *  measurably disturb narrowband tests like the Doppler one that
+   *  assume a single dominant tone).
+   *
+   *  Each ear is gated independently by the FROZEN per-generation
+   *  validity mask freezeImageRadii returns (bit w = ear L, bit w+6 =
+   *  ear R — frozen at the same instant as the radii; see that method's
+   *  foreign-clock note): a wall whose plane the ear sat on the wrong
+   *  side of at freeze time gets no splat for that ear this whole
+   *  generation, since the mirror formula is only a real reflection
+   *  when the ear is on the room's interior side (see updateWallMirrors
+   *  for the measured pathology this prevents).
+   *
+   *  `timelineTag` is the same slot discriminator freezeRadii's callers
+   *  already pass (1 = free, asg+2 = captured); combined with `g` here
+   *  into freezeImageRadii's tag, exactly mirroring freezeRadii's own
+   *  `g*16+slot` scheme — and it also selects the timeline's own image
+   *  ring (TL_FREE/TL_CAP), same routing as every direct freeze.
+   *
+   *  Returns true if anything splatted, for the caller's `sounding`. */
+  splatImageSplats(k, g, timelineTag, x, y, z, tHop, tEnd, bStart, bLen, anchor,
+    freq, base, envO, sat, tableA, tableB, tf) {
+    const out = this.imgOut;
+    const vm = this.freezeImageRadii(
+      timelineTag === 1 ? TL_FREE : TL_CAP, k, g, g * 16 + timelineTag, x, y, z, out,
+    );
+    let sounding = false;
+    for (let w = 0; w < 6; w++) {
+      if (vm & (1 << w)) {
+        const rL = out[w * 4];
+        const dopL = 1 - out[w * 4 + 2] / SPEED_OF_SOUND;
+        const sL = this.splatBurstArrival(
+          this.bedReL, this.bedImL, tHop, tEnd, bStart, bLen,
+          rL / SPEED_OF_SOUND, rL, anchor, freq, dopL,
+          REFL_COEF * base / Math.max(rL, NEAR_CLAMP),
+          envO, sat, tableA, tableB, tf, IMAGE_AMP_SKIP,
+        );
+        if (sL) sounding = true;
+      }
+      if (vm & (1 << (w + 6))) {
+        const rR = out[w * 4 + 1];
+        const dopR = 1 - out[w * 4 + 3] / SPEED_OF_SOUND;
+        const sR = this.splatBurstArrival(
+          this.bedReR, this.bedImR, tHop, tEnd, bStart, bLen,
+          rR / SPEED_OF_SOUND, rR, anchor, freq, dopR,
+          REFL_COEF * base / Math.max(rR, NEAR_CLAMP),
+          envO, sat, tableA, tableB, tf, IMAGE_AMP_SKIP,
+        );
+        if (sR) sounding = true;
+      }
+    }
+    return sounding;
   }
 
   synthesizeHop() {
     this.selectHeroes(); // coherent hero mask for the whole hop, before fillBed
+    // Task 6: image budget reads isHero (just computed) + scoreAmp (last
+    // hop's) — before fillBed overwrites scoreAmp for THIS hop. Off-path
+    // never reads imageMask (fillBed's wantImages gates on transport
+    // first), so this is skipped off-path purely to save the O(POOL·K)
+    // scan, not for correctness.
+    if (this.p.transport) this.computeImageBudget();
     this.bedReL.fill(0); this.bedImL.fill(0);
     this.bedReR.fill(0); this.bedImR.fill(0);
     this.fillBed(this.bedTime);
@@ -809,7 +2016,17 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     // cum2[j] = sum of lut[0..j-1]^2 — segment mean-square in O(1)
     const cum2 = new Float32Array(ENV_LUT_SIZE + 2);
     for (let j = 0; j <= ENV_LUT_SIZE; j++) cum2[j + 1] = cum2[j] + lut[j] * lut[j];
-    return { lut, cum2 };
+    // TRANSPORT: tail01 = the normalized age above which the envelope's
+    // remaining energy is ≤1% of the burst total. Baked here (param-rate)
+    // for the hero-eligibility bound: the hero renderer truncates a
+    // grain's arrival tail at the next emission-generation boundary, and
+    // a voice may only be a hero while that truncation stays under 1%
+    // (see heroEligible). Smear 0.5 / asym 0 bakes tail01 ≈ 0.902.
+    const total = cum2[ENV_LUT_SIZE + 1];
+    let jt = ENV_LUT_SIZE + 1;
+    while (jt > 0 && total - cum2[jt - 1] <= 0.01 * total) jt--;
+    const tail01 = Math.min(1, jt / ENV_LUT_SIZE);
+    return { lut, cum2, tail01 };
   }
 
   /** Bake the grain-kernel family from the current envelope LUT: one
@@ -1007,6 +2224,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         pz = o.centerZ + (pz - o.centerZ) * f;
       }
     }
+    // raw landing to scratch BEFORE spatialize: transport reads the
+    // position itself (per-ear ranges), not the collapsed pan/dist gains
+    s.px = px;
+    s.py = py;
+    s.pz = pz;
     this.spatialize(px, py, pz, spat);
 
     // color -> timbre, mirroring the GPU blend chain
@@ -1042,6 +2264,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     s.capBright = 0.35 + 0.65 * val;
     const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
     s.capAmp = 0.13 * s.capBright * mag * o.gain * bassBoost(s.capFreq);
+    // transport's emission loudness: the same calibration WITHOUT the
+    // spatialize() magnitude — 1/max(rE, NEAR_CLAMP) replaces it per
+    // ear. A separate full expression (not capAmp/mag) so the off
+    // path's capAmp rounding stays bit-identical.
+    s.capAmp0 = 0.13 * s.capBright * o.gain * bassBoost(s.capFreq);
     s.capPanL = bassMono(spat[0] / mag, s.capFreq);
     s.capPanR = bassMono(spat[1] / mag, s.capFreq);
   }
@@ -1105,10 +2332,14 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       this.spatialize(s.fx, s.fy, s.fz, spat);
       const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
       s.amp = 0.1 * bright * mag * bassBoost(s.freeFreq);
+      // transport's emission loudness, sans spatialize() magnitude
+      // (separate expression: the off path's amp rounding is sacred)
+      s.amp0 = 0.1 * bright * bassBoost(s.freeFreq);
       s.panL = bassMono(spat[0] / mag, s.freeFreq);
       s.panR = bassMono(spat[1] / mag, s.freeFreq);
     } else {
       s.amp = 0;
+      s.amp0 = 0;
     }
   }
 
@@ -1176,6 +2407,15 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const sqrtW = Math.sqrt(W);
     const wFreeHero = sqrtW * p.fieldGain;
     const gStep = 1 / (0.08 * sampleRate); // 80ms linear hero fade ramp
+    // TRANSPORT: heroes get ears too — per-ear arrival cursor tE = t − dE,
+    // 1/max(rE,NEAR_CLAMP), carrier re-anchored at anchorE = anchor + dE,
+    // the SAME per-grain machinery the bed uses (freezeRadii) so a promoted
+    // voice is bit-for-bit the signal the bed was drawing, keeping the
+    // heroGain/(1−heroGain) crossfade coherent. OFF is the single-cursor
+    // Stage-1 path, verbatim (branch below).
+    const transport = !!p.transport;
+    const invNear = 1 / NEAR_CLAMP; // max amplitude factor (1/max(rE,·) ≤ this)
+    const earScratch = this.bedREar; // freezeRadii out [rL,rR]; fillBed is done for this quantum
 
     const anyObjects = p.objects.some((o) => o && o.level > 0.001);
     for (let k = 0; k < POOL; k++) {
@@ -1210,6 +2450,10 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           const aO = Math.ceil(cycStartH * sampleRate) / sampleRate;
           v.capPhase = ((((t - aO) * v.capFreq) % 1) + 1) % 1 * TABLE_SIZE;
         }
+        // Task 4: a fresh promotion gets a fresh absorption filter — old
+        // memory from a previous, unrelated hero stint must not leak in
+        this.heroLpL[k] = 0;
+        this.heroLpR[k] = 0;
       }
 
       if ((v.capOn ? v.capAmp : v.amp) > 0.0002) activeHeroes++;
@@ -1218,6 +2462,7 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // hero loop records what the bed would have recorded
       this.scoreCapOn[k] = v.capOn ? 1 : 0;
       this.scoreAmp[k] = v.capOn ? v.capAmp : v.amp;
+      this.scoreEligible[k] = transport ? this.heroEligible(k, v) : 1;
 
       const gTarget = this.heroTarget[k];
 
@@ -1230,7 +2475,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       // (sync=1); using that upper bound here (rather than the exact
       // per-object wCap) means this pre-check can only under-skip, never
       // wrongly skip an audible voice.
-      if (v.amp * wFreeHero <= 0.0002 && (!anyObjects || v.capAmp * p.objectGain * W <= 0.0002)
+      // transport bounds amplitude by the emission loudness (amp0, no
+      // spatialize magnitude) times the largest possible 1/max(rE,·) = invNear,
+      // so the skip can only UNDER-skip, never silence an audible near voice.
+      const quietFree = transport ? v.amp0 * wFreeHero * invNear : v.amp * wFreeHero;
+      const quietCap = transport ? v.capAmp0 * p.objectGain * W * invNear : v.capAmp * p.objectGain * W;
+      if (quietFree <= 0.0002 && (!anyObjects || quietCap <= 0.0002)
         && this.heroGain[k] <= 0.001 && this.heroTarget[k] === 0) {
         const tEnd = t0 + n * dt;
         const nextF = (v.gen + 1 - v.phi) / invLFree;
@@ -1242,6 +2492,190 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           // block (2.7ms) re-evaluates
           continue;
         }
+      }
+
+      if (transport) {
+        // Per-ear cursors. The generation machinery stays on the EMISSION
+        // clock t (dE only shifts the read-out), so dE/rE/anchor are frozen
+        // per generation and recomputed on generation change alone — never
+        // per sample. rE comes from the SAME freezeRadii ring the bed reads
+        // (identical positions, identical tag), so the hero's rL/rR are the
+        // bed's rL/rR to the bit; the two renderings of one voice are one
+        // signal and the crossfade cannot comb. anchorE = anchor + dE is
+        // factored as "closed form at anchor, evaluated at tE" — the per-ear
+        // re-anchor (incl. at promotion) is then automatic, no stored phase
+        // accumulator to go stale (this is the cleanest allocation-free
+        // structure: a second cursor would only be redundant state able to
+        // drift from the first).
+        const rr2 = earScratch;
+        this.freezeRadii(TL_FREE, k, v.gen, v.gen * 16 + 1, v.fx, v.fy, v.fz, rr2);
+        let fdL = rr2[0] / SPEED_OF_SOUND, fdR = rr2[1] / SPEED_OF_SOUND;
+        let fiL = 1 / Math.max(rr2[0], NEAR_CLAMP), fiR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+        // Doppler (Task 5): per-ear carrier multiplier 1 − rdot/c, frozen
+        // alongside fdL/fdR/fiL/fiR from the SAME freezeRadii call — read
+        // before rr2 is overwritten by the capture branch below.
+        let fEmL = 1 - rr2[2] / SPEED_OF_SOUND, fEmR = 1 - rr2[3] / SPEED_OF_SOUND;
+        let faF = Math.ceil(((v.gen - v.phi) / invLFree) * sampleRate) / sampleRate;
+        let cdL = 0, cdR = 0, ciL = 0, ciR = 0, caO = 0, cEmL = 1, cEmR = 1;
+        if (v.capOn) {
+          this.freezeRadii(TL_CAP, k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
+          cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
+          ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+          cEmL = 1 - rr2[2] / SPEED_OF_SOUND; cEmR = 1 - rr2[3] / SPEED_OF_SOUND;
+          caO = Math.ceil(((v.asgGen - v.asgPhi) / v.asgInvTau) * sampleRate) / sampleRate;
+        }
+        // Task 4: per-ear one-pole approximating air absorption at this
+        // voice's OWN carrier. Heroes render one wavetable-blended
+        // waveform (fundamental + harmonics pre-summed), not separate
+        // partials like the bed's per-partial LUT splat, so this is an
+        // honest single-point match rather than the bed's exact one:
+        // solve the one-pole's coefficient so its magnitude AT THE
+        // CARRIER equals airGain(freq, rE) — treat the one-pole as a
+        // continuous-time RC lowpass |H(f)| = wc/sqrt(wc²+f²), solve its
+        // cutoff wc from the target gain G at f=freq (wc = f·G/sqrt(1−G²)),
+        // then map to a digital coefficient the same way the constructor's
+        // limRelease/hpR one-poles do (a = exp(−2π·wc/sampleRate)).
+        // The derivation is generic in G, so it survives the AIR_COEF
+        // correction unchanged — re-derived and checked at the physical
+        // constant: G stays within ~2.5% of 1 across the whole box (e.g.
+        // G = 0.9919 at 3.5 kHz / r = 3 m → wc ≈ 27 kHz, a ≈ 0.028;
+        // G = 0.9757 at r = 9 m → wc ≈ 16 kHz, a ≈ 0.13), so the pole is
+        // EXTREMELY mild — a fraction-of-a-dB tilt whose cutoff sits at
+        // or above Nyquist. Up there the analog-RC→exp map is crude, but
+        // the filter it yields is nearly transparent with the correct
+        // gain at the carrier, which is the whole contract. That mildness
+        // is the point: physical honesty, not a special effect.
+        // Approximation, stated honestly: harmonics ride the SAME filter
+        // as the fundamental (the bed alone gets each partial's own
+        // absorption right); rE and freq are read once here, at block
+        // start (not re-solved on a mid-block generation change) — a
+        // ~2.7 ms quantum is far shorter than any audible distance change,
+        // so this is "set per block" exactly as the plan specifies.
+        const heroFreq0 = v.capOn ? v.capFreq : v.freeFreq;
+        const gL0 = Math.max(1e-4, Math.min(0.999999, this.airGain(heroFreq0, rr2[0])));
+        const gR0 = Math.max(1e-4, Math.min(0.999999, this.airGain(heroFreq0, rr2[1])));
+        const wcL = (heroFreq0 * gL0) / Math.sqrt(Math.max(1e-12, 1 - gL0 * gL0));
+        const wcR = (heroFreq0 * gR0) / Math.sqrt(Math.max(1e-12, 1 - gR0 * gR0));
+        const aHL = Math.exp((-2 * Math.PI * wcL) / sampleRate);
+        const aHR = Math.exp((-2 * Math.PI * wcR) / sampleRate);
+        for (let s = 0; s < n; s++) {
+          const xF = t * invLFree + v.phi;
+          const gFn = Math.floor(xF);
+          if (gFn !== v.gen) {
+            this.refreshFreeGeneration(v, gFn, spat, v);
+            if (anyObjects) this.evaluateCapture(v, t, spat, v);
+            this.freezeRadii(TL_FREE, k, gFn, gFn * 16 + 1, v.fx, v.fy, v.fz, rr2);
+            fdL = rr2[0] / SPEED_OF_SOUND; fdR = rr2[1] / SPEED_OF_SOUND;
+            fiL = 1 / Math.max(rr2[0], NEAR_CLAMP); fiR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+            fEmL = 1 - rr2[2] / SPEED_OF_SOUND; fEmR = 1 - rr2[3] / SPEED_OF_SOUND;
+            faF = Math.ceil(((gFn - v.phi) / invLFree) * sampleRate) / sampleRate;
+            if (v.capOn) {
+              this.freezeRadii(TL_CAP, k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
+              cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
+              ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+              cEmL = 1 - rr2[2] / SPEED_OF_SOUND; cEmR = 1 - rr2[3] / SPEED_OF_SOUND;
+              caO = Math.ceil(((v.asgGen - v.asgPhi) / v.asgInvTau) * sampleRate) / sampleRate;
+            }
+          }
+          let captured = v.capOn;
+          if (captured) {
+            const xO = t * v.asgInvTau + v.asgPhi;
+            if (Math.floor(xO) !== v.asgGen) {
+              this.evaluateCapture(v, t, spat, v);
+              captured = v.capOn;
+              if (captured) {
+                this.freezeRadii(TL_CAP, k, v.asgGen, v.asgGen * 16 + v.asg + 2, v.px, v.py, v.pz, rr2);
+                cdL = rr2[0] / SPEED_OF_SOUND; cdR = rr2[1] / SPEED_OF_SOUND;
+                ciL = 1 / Math.max(rr2[0], NEAR_CLAMP); ciR = 1 / Math.max(rr2[1], NEAR_CLAMP);
+                cEmL = 1 - rr2[2] / SPEED_OF_SOUND; cEmR = 1 - rr2[3] / SPEED_OF_SOUND;
+                caO = Math.ceil(((v.asgGen - v.asgPhi) / v.asgInvTau) * sampleRate) / sampleRate;
+              }
+            }
+          }
+          // emission loudness (amp0/capAmp0 carry bassBoost, NOT the
+          // spatialize magnitude — 1/max(rE,·) replaces it per ear) times
+          // the bed's exact particle weight, so hero and bed agree
+          let emitAmp, dL, dR, iL, iR, anch, freq, emL, emR, sat, tf, tAarr, tBarr, lutC;
+          if (captured) {
+            const o = p.objects[v.asg];
+            const wCap = (sqrtW + (W - sqrtW) * o.sync) * p.objectGain;
+            emitAmp = v.capAmp0 * wCap;
+            dL = cdL; dR = cdR; iL = ciL; iR = ciR; anch = caO; freq = v.capFreq;
+            emL = cEmL; emR = cEmR; // Doppler (Task 5): frozen 1 − rdot/c
+            sat = v.capSat; tf = v.capTableFrac;
+            tAarr = this.wheel[v.capTableA]; tBarr = this.wheel[v.capTableB];
+            lutC = objEnvLUT[v.asg] || envLUT;
+          } else {
+            emitAmp = v.amp0 * wFreeHero;
+            dL = fdL; dR = fdR; iL = fiL; iR = fiR; anch = faF; freq = v.freeFreq;
+            emL = fEmL; emR = fEmR; // Doppler (Task 5): frozen 1 − rdot/c
+            sat = v.freeSat; tf = v.freeTableFrac;
+            tAarr = this.wheel[v.freeTableA]; tBarr = this.wheel[v.freeTableB];
+            lutC = envLUT;
+          }
+          // gate on the LOUDEST the voice can render, emitAmp·invNear
+          // (the 1/max(rE,·) factor is ≤ 1/NEAR_CLAMP = 4): emitAmp alone
+          // is the pre-distance emission loudness, and gating on it would
+          // silently drop a near voice whose rendered amplitude
+          // emitAmp·iE is up to 4× larger — the same under-skip-only
+          // bound the outer fast path uses.
+          let xL = 0;
+          let xR = 0;
+          if (emitAmp * invNear > 0.0002) {
+            const hg = this.heroGain[k];
+            // ear L: envelope age from tL = t − dL (aa<0 → not yet arrived,
+            // silent, natural — UNSHIFTED by Doppler, per the closed-form
+            // derivation in splatBurstArrival's doc comment), carrier at
+            // tL against the shared anchor, using the frozen fE = freq·emL
+            const tL = t - dL;
+            const aaL = captured
+              ? (tL * v.asgInvTau + v.asgPhi - v.asgGen) / 0.6
+              : (tL * invLFree + v.phi - v.gen - v.offN) / v.durN;
+            if (aaL > 0 && aaL < 1) {
+              const env = lutC.lut[(aaL * ENV_LUT_SIZE) | 0];
+              if (env > 0.0001) {
+                let ph = ((tL - anch) * freq * emL) % 1;
+                if (ph < 0) ph += 1;
+                const idx = (ph * TABLE_SIZE) & TABLE_MASK;
+                const osc = sine[idx] * (1 - sat) + (tAarr[idx] * (1 - tf) + tBarr[idx] * tf) * sat;
+                xL = osc * env * emitAmp * iL * hg;
+              }
+            }
+            // ear R
+            const tR = t - dR;
+            const aaR = captured
+              ? (tR * v.asgInvTau + v.asgPhi - v.asgGen) / 0.6
+              : (tR * invLFree + v.phi - v.gen - v.offN) / v.durN;
+            if (aaR > 0 && aaR < 1) {
+              const env = lutC.lut[(aaR * ENV_LUT_SIZE) | 0];
+              if (env > 0.0001) {
+                let ph = ((tR - anch) * freq * emR) % 1;
+                if (ph < 0) ph += 1;
+                const idx = (ph * TABLE_SIZE) & TABLE_MASK;
+                const osc = sine[idx] * (1 - sat) + (tAarr[idx] * (1 - tf) + tBarr[idx] * tf) * sat;
+                xR = osc * env * emitAmp * iR * hg;
+              }
+            }
+          }
+          // Task 4 (hoisted OUT of the amplitude gate at the final
+          // review, so this contract is actually true): the one-pole is
+          // stepped EVERY sample this voice is in the hero loop — even
+          // through the gate's silence — so its memory decays honestly
+          // instead of freezing and leaking into a later, unrelated
+          // grain, and the decaying tail keeps reaching the output.
+          // Cost: 2 mul-adds per ear on gated samples; a truly idle
+          // voice never gets here (the outer fast path skips it).
+          this.heroLpL[k] = (1 - aHL) * xL + aHL * this.heroLpL[k];
+          outL[s] += this.heroLpL[k];
+          this.heroLpR[k] = (1 - aHR) * xR + aHR * this.heroLpR[k];
+          outR[s] += this.heroLpR[k];
+          const hg0 = this.heroGain[k];
+          this.heroGain[k] = hg0 < gTarget
+            ? Math.min(gTarget, hg0 + gStep)
+            : Math.max(gTarget, hg0 - gStep);
+          t += dt;
+        }
+        continue;
       }
 
       for (let s = 0; s < n; s++) {
@@ -1318,6 +2752,59 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           : Math.max(gTarget, hg0 - gStep);
         t += dt;
       }
+    }
+
+    // --- Sabine tail: 4-line FDN (Task 7) ---
+    // Transport-only, and STRUCTURALLY bypassed when off (a plain `if`
+    // around the whole block, not a wet gain of 0): with p.transport===0
+    // the buffers/pointers below are never read or written at all, so the
+    // null test's regression floor sees the exact pre-FDN state trajectory.
+    // Ordering decision: this runs BEFORE the rumble-blocker HP + limiter
+    // immediately below, tapping the DRY (pre-limiter) mix and adding its
+    // wet output back into outL/outR so the tail rides through the same
+    // HP/limiter chain as everything else — a reverb tail should get
+    // exactly the headroom treatment the dry signal gets, not bypass it
+    // (a post-limiter tail would dodge gain-riding and could push the mix
+    // over the limiter's ceiling on its own).
+    if (p.transport) {
+      const fdnBuf = this.fdnBuf;
+      const fdnGain = this.fdnGain;
+      const b0 = fdnBuf[0], b1 = fdnBuf[1], b2 = fdnBuf[2], b3 = fdnBuf[3];
+      const g0 = fdnGain[0], g1 = fdnGain[1], g2 = fdnGain[2], g3 = fdnGain[3];
+      const N0 = b0.length, N1 = b1.length, N2 = b2.length, N3 = b3.length;
+      const fdnPos = this.fdnPos;
+      let i0 = fdnPos[0], i1 = fdnPos[1], i2 = fdnPos[2], i3 = fdnPos[3];
+      for (let s = 0; s < n; s++) {
+        // read this sample's delay-line outputs (each is the value
+        // written N samples ago — see the buffer-sizing comment in the
+        // constructor)
+        const d0 = b0[i0], d1 = b1[i1], d2 = b2[i2], d3 = b3[i3];
+        // Hadamard/2 feedback mix: an orthogonal (energy-preserving)
+        // matrix scaled by 1/2 so the MIX ITSELF neither gains nor loses
+        // energy — all decay comes from the per-line gains below, so the
+        // tail's rate is exactly the RT60 law, never an artifact of the mix
+        const m0 = 0.5 * (d0 + d1 + d2 + d3);
+        const m1 = 0.5 * (d0 - d1 + d2 - d3);
+        const m2 = 0.5 * (d0 + d1 - d2 - d3);
+        const m3 = 0.5 * (d0 - d1 - d2 + d3);
+        // input: (dryL+dryR)*SEND, tapped pre-limiter (outL/outR here are
+        // the hero+bed mix, before the HP/limiter loop below), fed
+        // identically into every line
+        const send = (outL[s] + outR[s]) * FDN_SEND;
+        b0[i0] = send + g0 * m0;
+        b1[i1] = send + g1 * m1;
+        b2[i2] = send + g2 * m2;
+        b3[i3] = send + g3 * m3;
+        if (++i0 >= N0) i0 = 0;
+        if (++i1 >= N1) i1 = 0;
+        if (++i2 >= N2) i2 = 0;
+        if (++i3 >= N3) i3 = 0;
+        // wet out, added into the dry mix so it takes the SAME HP/limiter
+        // path the direct/echo content just took
+        outL[s] += (d0 - d2) * 0.5;
+        outR[s] += (d1 - d3) * 0.5;
+      }
+      fdnPos[0] = i0; fdnPos[1] = i1; fdnPos[2] = i2; fdnPos[3] = i3;
     }
 
     // rumble blocker (25 Hz one-pole high-pass, coefficient baked in the

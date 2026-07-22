@@ -20,6 +20,58 @@ time, timed strictly around the 4s render call, excluding the warmup
 render). Comfortably clears the 4x floor asserted by the test
 (`ms < 1000`).
 
+## Audio: corpuscular transport
+
+Machine: Wolgan desktop (Ryzen AI 9 HX 370 w/ Radeon 890M, GeForce RTX
+5090 Laptop GPU; audio render is pure CPU/Node, GPU irrelevant here).
+
+Test: `tests/engine.test.mjs` — "throughput with full transport stays
+>=3x realtime at 524k" (`particleCount: 524288, heroCount: 48,
+tau: 0.004, transport: 1`, same harness/warmup convention as the stage-1
+row above). Transport adds per-ear arrival, true 1/r, air absorption,
+Doppler, first-order image sources (salience-budgeted), and a 4-line
+Sabine FDN tail on top of the stage-1 bed/hero renderers — see
+`docs/superpowers/specs/2026-07-19-corpuscular-transport-design.md` and
+`SPEC.md` §7.2 for the full term list.
+
+Result: **3.6–3.8× realtime in-suite** (repeated `node --test
+"tests/*.test.mjs"` runs; this file's process also runs 27 other tests
+first, and ambient load from that shares the machine with the timed
+render) — comfortably above the plan's ≥3× gate. An **isolated** single-
+test run (this test alone, nothing else warming the process) measures
+**8.1–8.2× realtime** — the same in-suite-vs-isolated gap the stage-1 row
+above already shows at 9.3× isolated vs the numbers reported here; both
+are honest, reported as measured rather than smoothed over, per this
+project's "measure the trade" discipline (see
+`.superpowers/sdd/progress.md`, corpuscular-transport ledger, Task 6/7).
+
+Live (Playwright, `probes/audio_stage1.py`, `measure_flash_to_ring()`):
+places a captured, fully-synced point object at r = 3.0 m, flips
+`transport` mid-recording three times (alternating direction) while
+tapping the real `AudioContext` output through an `AnalyserNode`, and
+reads the flash-to-ring gap directly off each capture's own burst
+spacing (median of the three rounds reported). Five consecutive runs on
+this desktop: 8.09 ms, 8.02 ms, 8.18 ms, 10.12 ms, 6.73 ms — all within
+the probe's ±3 ms tolerance of the predicted r/343 ≈ 8.75 ms. Individual
+rounds are noisier (2.3–13.8 ms observed) than the median, because a
+live capture — unlike the offline suite's fully deterministic render —
+has real cycle-to-cycle jitter from the pool's ongoing capture/release
+churn; the three-round median is what's asserted and reported.
+
+**The bed's audibility horizon.** The bed enumerates a hop's contributing
+generations by looking back `DMAX` (0.09 s, first-order-image-widened
+from the direct-only 0.03 s) plus burst length and hop granularity —
+arithmetic worked out in Task 5's fix round: ≈133 ms total lookback ⇒
+≈45 m of flight distance (at c = 343 m/s) before a voice's arrival falls
+outside every hop's enumeration window and the bed simply never looks
+far enough back to render it — silence by enumeration boundary, not by
+any audibility law. The field box is 6×3×6 m (diagonal ≈9.4 m; first-
+order image paths add at most one more box crossing), so the horizon is
+never approached in normal play; it is a real, documented boundary
+condition rather than a bug, and is only reachable by deliberately
+placing an object far outside the box (as one regression test does, to
+prove the boundary is where the math says it is, not sooner).
+
 ## Readback probe (stage-2 gate)
 
 Run `npm run dev:quest`, open `https://<PC-IP>:5199/?probe=readback` on the

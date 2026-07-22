@@ -30,13 +30,22 @@ export function send(proc, type, data) {
   proc.port.onmessage({ data: { type, data } });
 }
 
-/** Render `seconds` of stereo audio in 128-sample quanta. */
-export function render(proc, seconds, params) {
+/** Render `seconds` of stereo audio in 128-sample quanta. `onQuantum(q)`,
+ *  if given, runs BEFORE quantum q is processed; a returned object is sent
+ *  as a params patch (merged via the engine's Object.assign ingestion),
+ *  letting a test move the listener mid-render (e.g. the Doppler test).
+ *  Returning null/undefined is a no-op — backward compatible with every
+ *  existing 3-arg call site. */
+export function render(proc, seconds, params, onQuantum) {
   if (params) send(proc, 'params', params);
   const quanta = Math.ceil((seconds * 48000) / 128);
   const L = new Float32Array(quanta * 128);
   const R = new Float32Array(quanta * 128);
   for (let q = 0; q < quanta; q++) {
+    if (onQuantum) {
+      const patch = onQuantum(q);
+      if (patch) send(proc, 'params', patch);
+    }
     const l = new Float32Array(128);
     const r = new Float32Array(128);
     proc.process([], [[l, r]]);
