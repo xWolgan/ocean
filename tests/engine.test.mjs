@@ -68,7 +68,10 @@ function bandEnergies(buf, bands = 8) {
 test('null test: free-field bed matches legacy band energies (W=1)', async () => {
   const Legacy = await loadEngine(new URL('../public/granular-legacy.js', import.meta.url));
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
-  const params = { ...BASE_PARAMS, particleCount: 256, heroCount: 0 };
+  // transport: 0 — this test IS the off-path regression floor vs the
+  // frozen legacy engine (transport ON legitimately diverges from
+  // legacy since Task 2: per-ear arrival + 1/r replace spatialize())
+  const params = { ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 0 };
   globalThis.currentTime = 0;
   const legacy = render(new Legacy(), 4.0, BASE_PARAMS).L.slice(48000);
   globalThis.currentTime = 0;
@@ -182,7 +185,11 @@ test('tau floor: an object below the GPU clamp (0.0005s) stays finite and audibl
 
 test('heroes render and the bed does not double them', async () => {
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
-  const params = { ...BASE_PARAMS, particleCount: 256 };
+  // transport: 0 — hero/bed loudness parity is an off-path property
+  // until Task 3 gives heroes ears: since Task 2 the bed renders
+  // 1/max(rE,NEAR_CLAMP) per ear while heroes still spatialize(), so a
+  // transport-ON promotion legitimately changes a voice's loudness.
+  const params = { ...BASE_PARAMS, particleCount: 256, transport: 0 };
   globalThis.currentTime = 0;
   const with32 = render(new Engine(), 3.0, { ...params, heroCount: 32 }).L.slice(48000);
   globalThis.currentTime = 0;
@@ -252,7 +259,10 @@ test('bed/hero crossfade is complementary: no energy dug out at moderate weight'
   // through the limiter, above any click threshold that would bind.
   // Energy conservation is the property the crossfade actually owns.
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
-  const params = { ...BASE_PARAMS, particleCount: 4096 };
+  // transport: 0 — same reason as the heroes-no-double test: hero/bed
+  // parity in transport mode returns with Task 3 (hero per-ear cursors);
+  // this ±0.4 dB guard owns the OFF-path crossfade machinery.
+  const params = { ...BASE_PARAMS, particleCount: 4096, transport: 0 };
   globalThis.currentTime = 0;
   const with32 = render(new Engine(), 3.0, { ...params, heroCount: 32 }).L.slice(48000);
   globalThis.currentTime = 0;
@@ -262,17 +272,63 @@ test('bed/hero crossfade is complementary: no energy dug out at moderate weight'
   assert.ok(Math.abs(db) < 0.4, `crossfade leaked ${db.toFixed(3)} dB at W=16`);
 });
 
-test('transport off is bit-identical to pre-transport engine', async () => {
+// Transport acceptance objects (corpuscular-transport Task 2). Fields
+// must match ObjectManager.audioDescriptors() exactly, like the autocorr
+// test's literal above. kind 3 with pa 0 is a sphere SHELL of radius 0:
+// every captured grain lands exactly at the center — a point source with
+// a known, test-computable distance to each ear.
+const GAP_OBJ = {
+  level: 1, claim: 1, tau: 0.02, sync: 1, scaleBlend: 0.4, pitchMul: 1,
+  centerX: 0, centerY: 1.7, centerZ: 1.4, reach: 10, gain: 1,
+  tintR: 0.8, tintG: 0.2, tintB: 0.2, tintW: 1, imgW: 0,
+  kind: 3, pa: 0, pb: 0, pc: 0,
+  crV: 0, crW: 1, srV: 0, srW: 1,
+  smearV: 0.5, smearW: 0, asymV: 0, asymW: 0,
+};
+
+test('flash-to-ring: transport delays the world by r/343, to the sample', async () => {
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  const base = { ...BASE_PARAMS, particleCount: 256, heroCount: 0, objects: [GAP_OBJ] };
   globalThis.currentTime = 0;
-  const off = render(new Engine(), 2.0, { ...BASE_PARAMS, particleCount: 256, heroCount: 8, transport: 0 }).L;
+  const off = render(new Engine(), 3.0, { ...base, transport: 0 }).L.slice(48000);
   globalThis.currentTime = 0;
-  const on = render(new Engine(), 2.0, { ...BASE_PARAMS, particleCount: 256, heroCount: 8, transport: 1 }).L;
-  // Task 1 ships transport as a no-op: on === off bit-exactly for now.
-  // Task 2 will REPLACE this assertion with the flash-to-ring lag test.
-  for (let i = 0; i < off.length; i++) {
-    assert.ok(off[i] === on[i], `diverged at sample ${i}`);
-  }
+  const on = render(new Engine(), 3.0, { ...base, transport: 1 }).L.slice(48000);
+  // Source (0, 1.7, 1.4) sits on the listener axis, r = 3.0 m from the
+  // head center (0, 1.7, 4.4). With EAR_OFFSET 0.09 the true per-ear
+  // range is hypot(3.0, 0.09) = 3.00135 m — 1.35 mm (≈0.2 samples) more
+  // than 3.0, irrelevant at the ±8-sample tolerance but computed exactly:
+  //   expected = hypot(3.0, 0.09) / 343 * 48000 = 420.02 → 420 samples.
+  const expected = Math.round(Math.hypot(3.0, 0.09) / 343 * 48000);
+  // maxLag 500, deliberately UNDER one object cycle minus the expected
+  // lag: GAP_OBJ renders an exactly tau-periodic pulse train (claim 1,
+  // sync 1, radius 0 — every cycle identical, and tau·48000 = 960 is an
+  // integer, so even the carrier anchor repeats exactly), so the true
+  // peak at 420 has periodic aliases at 420 ± 960 = −540, 1380 that only
+  // window-edge overlap counts would break ties against. 500 keeps every
+  // alias out of range; only the true arrival shift can win.
+  const { lag } = xcorrPeak(off, on, 500);
+  assert.ok(Math.abs(lag - expected) <= 8, `gap lag ${lag}, expected ≈${expected}`);
+});
+
+test('ITD: a lateral source leads in the near ear by the geometry', async () => {
+  const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));
+  // level with the head (same y, same z), 2 m to the right
+  const obj = { ...GAP_OBJ, centerX: 2.0, centerZ: 4.4 };
+  globalThis.currentTime = 0;
+  const { L, R } = render(new Engine(), 3.0, {
+    ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1, objects: [obj],
+  });
+  // ears at (±0.09, 1.7, 4.4): rL = 2.09, rR = 1.91 exactly (y and z
+  // components vanish). The right ear is nearer, so R leads L by
+  //   (2.09 − 1.91) / 343 * 48000 = 25.19 → ≈25 samples.
+  // Sign convention (verified empirically): L[i] ≈ k·R[i − 25], and
+  // xcorrPeak(L, R, ·) maximizes Σ L[i]·R[i+lag], so the peak lands at
+  // lag = −25 (R must be pulled BACK to align with the later L). The
+  // magnitude is the assertion, per the brief. tau-periodic aliases sit
+  // at −25 ± 960, far outside maxLag 100.
+  const expected = Math.round((2.09 - 1.91) / 343 * 48000);
+  const { lag } = xcorrPeak(L.slice(48000), R.slice(48000), 100);
+  assert.ok(Math.abs(Math.abs(lag) - expected) <= 5, `ITD lag ${lag}, expected |lag|≈${expected}`);
 });
 
 function xcorrPeak(a, b, maxLag) {
@@ -332,8 +388,13 @@ test('live ordering: bed and heroes share one clock after a late, large timeOffs
       proc.process([], [[new Float32Array(128), new Float32Array(128)]]);
       globalThis.currentTime += 128 / 48000;
     }
+    // transport: 0 — this test asserts sample-level alignment against
+    // the LEGACY engine (|lag| ≤ 16) and hero/bed coherence; transport
+    // ON delays the bed by r/343 (~600 samples here) by design, and
+    // heroes get their matching ears only in Task 3.
     return render(proc, 3.0, {
       ...BASE_PARAMS, objects: [obj], particleCount: 256, heroCount, timeOffset: 3.713,
+      transport: 0,
     }).L.slice(-48000); // 1s tail, well after resync + hero fades settle
   };
   const Engine = await loadEngine(new URL('../public/granular-processor.js', import.meta.url));

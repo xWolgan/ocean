@@ -52,8 +52,19 @@ const NEAR_CLAMP = 0.25; // m, amplitude-only floor (1/max(r, NEAR_CLAMP)); prop
 const REFL_COEF = 0.7; // image-source wall reflection coefficient (Task 6)
 const RT60 = 0.4; // s, Sabine tail decay target (Task 7's FDN)
 const AIR_COEF = 2.8e-6; // air absorption: alpha(f) = AIR_COEF * f^2, gain = exp(-alpha * r) (~ -1 dB at 4 kHz over 7 m)
+const DMAX = 0.03; // s, max direct-path flight time the bed enumerates for
+// (≈10.3 m at c=343 — beyond the box diagonal from any in-box listener;
+// Task 6 raises this to 0.09 to cover first-order image paths)
 
 const POOL = 256;
+// per-voice frozen-radius ring slots (transport): must cover the widest
+// generation window one hop can enumerate, so tags never collide within
+// a burst's flight. Worst cases — free timeline at the UI tau floor
+// 0.00025 s: slotLen ≥ 0.00025·0.5·1.8 = 0.000225 s, window = blockT
+// 0.02133 + DMAX 0.03 + 0.75·slotLen ≈ 229 slots; captured at the
+// ingestion tau floor 0.0005 s: (0.02133 + 0.03)/0.0005 + 0.6 ≈ 104
+// cycles. 256 ≥ both.
+const TRANSPORT_RING = 256;
 // calibrated against legacy engine RMS, Task 5 (measured total-level
 // offset with the grain-kernel family, slot-anchored phases and true
 // wavetable blend in place; see task-5-report.md, fix round 2)
@@ -157,8 +168,15 @@ class Voice {
     this.capTableFrac = 0;
     this.capOn = 0;
     this.capAmp = 0;
+    this.capAmp0 = 0; // emission loudness sans spatialize() magnitude —
+    // transport's amplitude source (1/max(rE,NEAR_CLAMP) replaces it)
     this.capPanL = 0.7;
     this.capPanR = 0.7;
+    // raw captured landing position (world m) — transport reads the
+    // position itself, not spatialize()d gains
+    this.px = 0;
+    this.py = 0;
+    this.pz = 0;
     this.capPhase = 0; // separate oscillator phase per timeline — the free
     // clock must never touch a captured grain's phase
 
@@ -180,6 +198,7 @@ class Voice {
     this.gen = -1e18;
     this.capturedNow = false;
     this.amp = 0;
+    this.amp0 = 0; // free emission loudness sans spatialize() magnitude
     this.panL = 0.7;
     this.panR = 0.7;
     this.phase = 0;
@@ -204,11 +223,12 @@ class Voice {
       fx: 0, fy: 0, fz: 0,
       freeTableA: 0, freeTableB: 0, freeTableFrac: 0,
       freeSat: 0, freeFreq: 440,
-      amp: 0, panL: 0.7, panR: 0.7,
+      amp: 0, amp0: 0, panL: 0.7, panR: 0.7,
       asg: -1, asgGen: -1e18, asgInvTau: 1, asgPhi: 0,
       capPhase: 0, capOn: 0, capFreq: 440, capSat: 0, capBright: 1,
-      capTableA: 0, capTableB: 0, capTableFrac: 0, capAmp: 0,
+      capTableA: 0, capTableB: 0, capTableFrac: 0, capAmp: 0, capAmp0: 0,
       capPanL: 0.7, capPanR: 0.7,
+      px: 0, py: 0, pz: 0,
     };
   }
 }
@@ -351,6 +371,14 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     this.poolSounding = 0; // non-hero pool voices that splatted this hop
     // (fillBed writes it; process() reads it for the bed stats field)
     this.bedSpat = [0, 0]; // scratch for fillBed's spatialize calls — no per-hop alloc
+    // frozen per (voice, generation, ear) transport radii — see
+    // freezeRadii. Generation-indexed rings per voice; the Float64 tag
+    // (NaN = never written, and NaN !== NaN keeps empty slots cold)
+    // detects staleness. Preallocated: the hop path allocates nothing.
+    this.bedRL = new Float32Array(POOL * TRANSPORT_RING);
+    this.bedRR = new Float32Array(POOL * TRANSPORT_RING);
+    this.bedRTag = new Float64Array(POOL * TRANSPORT_RING).fill(NaN);
+    this.bedREar = [0, 0]; // freezeRadii out-scratch [rL, rR]
 
     this.port.onmessage = (e) => {
       if (e.data.type === 'params') {
@@ -485,6 +513,12 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     const spat = this.bedSpat;
     const anyObjects = p.objects.some((o) => o && o.level > 0.001);
     const blockT = BLOCK / sampleRate;
+    // corpuscular transport: ON renders every burst's ARRIVAL per ear
+    // (delay rE/c, amplitude 1/max(rE, NEAR_CLAMP), no pan, no bassMono);
+    // OFF is the bit-sacred Stage-1 path (spatialize() gains, shared
+    // splat position) guarded by the null test vs granular-legacy.js.
+    const transport = !!p.transport;
+    const rr = this.bedREar; // [rL, rR] scratch for freezeRadii
     for (let k = 0; k < POOL; k++) {
       // complementary crossfade with the hero path: the bed renders this
       // voice at (1 − heroGain) while the hero loop renders it at
@@ -528,10 +562,21 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         // ingestion tau floor (0.0005s, mirroring the GPU clamp) the worst
         // real case is 21.33ms/0.0005 ≈ 43 cycles per block, so 128 is
         // ~3× margin over the floored minimum.
-        let gO = Math.floor(tHop * s.asgInvTau + s.asgPhi);
+        //
+        // TRANSPORT widening: a hop must consider cycles whose ARRIVAL
+        // may overlap it, so the emission enumeration extends back by
+        // DMAX + the burst length 0.6·tau; each ear then tests its own
+        // arrival window. Widened worst case at the tau floor:
+        // (21.33ms + 30ms)/0.5ms + 0.6 ≈ 104 cycles → cap 320 keeps the
+        // off path's ~3× margin. lookCap is exactly 0 with transport
+        // off, so (tHop − lookCap) reduces bit-exactly to tHop and the
+        // Stage-1 enumeration is preserved verbatim.
+        let lookCap = transport ? DMAX + 0.6 / s.asgInvTau : 0;
+        const iterCap = transport ? 320 : 128;
+        let gO = Math.floor((tHop - lookCap) * s.asgInvTau + s.asgPhi);
         let gOEnd = Math.floor(tEnd * s.asgInvTau + s.asgPhi);
         let iter = 0;
-        for (; gO <= gOEnd && ++iter <= 128; gO++) {
+        for (; gO <= gOEnd && ++iter <= iterCap; gO++) {
           if (gO !== s.asgGen) {
             // re-evaluate at the cycle's midpoint — the same reach/lottery
             // test the hero path runs at each cycle boundary
@@ -547,7 +592,22 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             // selector (next task) promotes freshly-released voices to
             // sample-accurate heroes at exactly these transition moments,
             // covering the audible surface. See task-6-report.md.
-            if (!s.capOn) break;
+            //
+            // TRANSPORT: the widened enumeration visits cycles up to
+            // 30ms+burst in the past, and any one of them may simply
+            // have lost its per-cycle claim lottery while the voice IS
+            // captured at tHop — a break here would then silence real
+            // later cycles for the whole hop. Skip just that cycle:
+            // restore the assignment slot (evaluateCapture cleared it;
+            // asgInvTau/asgPhi/asgGen are untouched on a failed pick)
+            // so the next iteration re-evaluates on the same scheme.
+            // The off path keeps its documented break (≤1-block gap at
+            // the release instant, mitigated by the hero selector).
+            if (!s.capOn) {
+              if (!transport) break;
+              s.asg = prevAsg;
+              continue;
+            }
             if (s.asg !== prevAsg || s.asgInvTau !== prevInvTau || s.asgPhi !== prevPhi) {
               // mid-block HANDOFF: the voice now belongs to an object with
               // a different cycle scheme. Rebase counter, bounds and the
@@ -557,7 +617,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
               // on the new scheme's first cycle.
               o = p.objects[s.asg];
               wCap = (Math.sqrt(W) + (W - Math.sqrt(W)) * o.sync) * p.objectGain;
-              const tCursor = Math.max(tHop, (gO - prevPhi) / prevInvTau);
+              // transport: the new scheme's lookback replaces the old
+              // one's (new tau → new burst length); 0 when off, so the
+              // off-path rebase arithmetic is bit-identical
+              lookCap = transport ? DMAX + 0.6 / s.asgInvTau : 0;
+              const tCursor = Math.max(tHop - lookCap, (gO - prevPhi) / prevInvTau);
               gO = Math.floor(tCursor * s.asgInvTau + s.asgPhi) - 1;
               gOEnd = Math.floor(tEnd * s.asgInvTau + s.asgPhi);
               continue;
@@ -568,6 +632,38 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           const bStart = cycStart;
           const bLen = 0.6 * cycLen; // duty 0.6, matching the hero path's
           // aa = (xO - asgGen) / 0.6
+
+          if (transport) {
+            // per-ear arrival: one splat into each ear's tile, with the
+            // ear's own delay, amplitude 1/max(rE, NEAR_CLAMP) (true
+            // spreading; bassBoost stays inside capAmp0 — it is
+            // emission-side loudness calibration), and NO pan/bassMono —
+            // each ear receives the full pressure of the wave, as in
+            // air. rL/rR are FROZEN per (voice, generation, ear) at the
+            // cycle's first consideration (freezeRadii), so a grain in
+            // flight never bends when the listener moves. Anchor is the
+            // same closed-form cycle anchor the off path splats with;
+            // the helper shifts it by the flight time (see
+            // splatBurstArrival's derivation).
+            this.freezeRadii(k, gO, gO * 16 + s.asg + 2, s.px, s.py, s.pz, rr);
+            const anchor = Math.ceil(cycStart * sampleRate) / sampleRate;
+            const envO = this.objEnvLUT[s.asg] || this.envLUT;
+            const base = s.capAmp0 * wCap * bedG;
+            const sL = this.splatBurstArrival(
+              this.bedReL, this.bedImL, tHop, tEnd, bStart, bLen,
+              rr[0] / SPEED_OF_SOUND, anchor, s.capFreq,
+              base / Math.max(rr[0], NEAR_CLAMP),
+              envO, s.capSat, s.capTableA, s.capTableB, s.capTableFrac,
+            );
+            const sR = this.splatBurstArrival(
+              this.bedReR, this.bedImR, tHop, tEnd, bStart, bLen,
+              rr[1] / SPEED_OF_SOUND, anchor, s.capFreq,
+              base / Math.max(rr[1], NEAR_CLAMP),
+              envO, s.capSat, s.capTableA, s.capTableB, s.capTableFrac,
+            );
+            if (sL || sR) sounding = true;
+            continue;
+          }
 
           // same Gabor-true two-regime rendering as the free path below:
           // a short burst IS a grain — one designated-hop splat carrying
@@ -662,16 +758,46 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       }
 
       const invLFree = (1 / p.tau) / (v.slotJitter * 1.8);
-      // every free generation whose burst overlaps this block
-      let g = Math.floor(tHop * invLFree + v.phi);
+      // every free generation whose burst overlaps this block — in
+      // transport mode, whose burst's ARRIVAL may overlap it: the burst
+      // lives inside its slot and arrives ≤ DMAX late, so looking back
+      // by DMAX + the max burst length 0.75·slotLen covers every
+      // candidate (per-ear arrival windows do the exact test). lookFree
+      // is exactly 0 with transport off — the Stage-1 enumeration
+      // arithmetic is preserved bit-exactly.
+      const lookFree = transport ? DMAX + 0.75 / invLFree : 0;
+      let g = Math.floor((tHop - lookFree) * invLFree + v.phi);
       const gEnd = Math.floor(tEnd * invLFree + v.phi);
       for (; g <= gEnd; g++) {
         if (g !== s.gen) this.refreshFreeGeneration(v, g, spat, s);
-        if (s.amp <= 0.0002) continue;
+        if ((transport ? s.amp0 : s.amp) <= 0.0002) continue;
         const slotStart = (g - v.phi) / invLFree;
         const slotLen = 1 / invLFree;
         const bStart = slotStart + s.offN * slotLen;
         const bLen = s.durN * slotLen;
+        if (transport) {
+          // per-ear arrival for the free mass — same contract as the
+          // captured transport block above: frozen radii per (voice,
+          // generation, ear), 1/max(rE, NEAR_CLAMP) amplitude, no pan,
+          // no bassMono; the slot anchor travels with the grain.
+          this.freezeRadii(k, g, g * 16 + 1, s.fx, s.fy, s.fz, rr);
+          const anchor = Math.ceil(slotStart * sampleRate) / sampleRate;
+          const base = s.amp0 * wFree * bedG;
+          const sL = this.splatBurstArrival(
+            this.bedReL, this.bedImL, tHop, tEnd, bStart, bLen,
+            rr[0] / SPEED_OF_SOUND, anchor, s.freeFreq,
+            base / Math.max(rr[0], NEAR_CLAMP),
+            this.envLUT, s.freeSat, s.freeTableA, s.freeTableB, s.freeTableFrac,
+          );
+          const sR = this.splatBurstArrival(
+            this.bedReR, this.bedImR, tHop, tEnd, bStart, bLen,
+            rr[1] / SPEED_OF_SOUND, anchor, s.freeFreq,
+            base / Math.max(rr[1], NEAR_CLAMP),
+            this.envLUT, s.freeSat, s.freeTableA, s.freeTableB, s.freeTableFrac,
+          );
+          if (sL || sR) sounding = true;
+          continue;
+        }
         // Gabor-true rendering, two regimes by burst duration:
         //
         // SHORT burst (fits inside one analysis window): the burst IS a
@@ -805,6 +931,151 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       this.scoreCapOn[k] = 0;
       this.scoreAmp[k] = s.amp;
     }
+  }
+
+  /** TRANSPORT: per-ear ranges rL/rR from a grain's emission point,
+   *  FROZEN per (voice k, generation g, ear) — the foreign-clock rule
+   *  for propagation. The first hop that considers a generation computes
+   *  both ranges from the CURRENT earL/earR and freezes them in a
+   *  per-voice generation ring; every later hop that revisits the same
+   *  generation (a grain still in flight) reuses the frozen values even
+   *  if the listener has moved since — control-rate listener updates
+   *  take effect at natural births, and a grain never bends mid-flight.
+   *
+   *  `tag` uniquely encodes (generation, timeline): g·16 + slot + 2,
+   *  slot = −1 for the free timeline, the object slot (0..7) for
+   *  captured — exact in a double far beyond any session length
+   *  (|g|·16 ≪ 2^53). Ring slot = g mod TRANSPORT_RING; the ring is
+   *  sized so two generations live in one hop's widened window can
+   *  never share a slot (see the TRANSPORT_RING comment), and a stale
+   *  tag simply recomputes. Writes [rL, rR] into `out`; no allocation.
+   *
+   *  Stage-2 note: on the GPU this whole cache disappears — the splat
+   *  shader computes the same two distances per grain from the frozen
+   *  per-generation ear uniform, closed-form and state-free. */
+  freezeRadii(k, g, tag, x, y, z, out) {
+    const idx = k * TRANSPORT_RING + (((g % TRANSPORT_RING) + TRANSPORT_RING) % TRANSPORT_RING);
+    if (this.bedRTag[idx] === tag) {
+      out[0] = this.bedRL[idx];
+      out[1] = this.bedRR[idx];
+      return;
+    }
+    const eL = this.earL;
+    const eR = this.earR;
+    let dx = x - eL[0];
+    let dy = y - eL[1];
+    let dz = z - eL[2];
+    const rL = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    dx = x - eR[0];
+    dy = y - eR[1];
+    dz = z - eR[2];
+    const rR = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    this.bedRTag[idx] = tag;
+    this.bedRL[idx] = rL;
+    this.bedRR[idx] = rR;
+    out[0] = rL;
+    out[1] = rR;
+  }
+
+  /** TRANSPORT: splat one emitted burst into ONE ear's tile at its
+   *  arrival time. This is the whole phase algebra of corpuscular
+   *  transport, so here is the derivation:
+   *
+   *  The ear receives the emitted wave at retarded time,
+   *      y_ear(t) = A(rE) · y_emit(t − dE),        dE = rE / c,
+   *  with dE frozen for the grain's lifetime (freezeRadii). The emitted
+   *  carrier is the slot/cycle-anchored closed form of the per-sample
+   *  engine, sin(2πf·(t_emit − anchor)), so
+   *      y_ear(t) = A · sin(2πf·((t − dE) − anchor))
+   *               = A · sin(2πf·(t − (anchor + dE)))
+   *  — the received tone is the SAME anchored oscillator with its
+   *  anchor displaced by the flight time: anchorE = anchor + dE. The
+   *  envelope rides the same retarded clock, env((t − dE − bStart)/bLen),
+   *  so the burst window, the designated-hop/mid-strip test, the splat
+   *  `shift`, and every carrier (fundamental and partials alike, each at
+   *  h·f on the same anchorE) translate rigidly by dE: time-of-flight is
+   *  a translation of the whole grain, never a distortion of it. Two
+   *  ears get two translations of one emission — ITD, per-ear
+   *  interference and combs are corollaries, not features.
+   *
+   *  `amp0` carries emission loudness × weights × bedG ×
+   *  1/max(rE, NEAR_CLAMP); this helper adds only the envelope/COLA/
+   *  calibration terms — the SAME ones the transport-off path applies
+   *  (envSegRMS, √2, √overlap, GRAIN_COLA, BED_CAL, duration-bucketed
+   *  grain kernels), so one BED_CAL keeps calibrating both modes.
+   *  Returns true if anything was splatted (the caller's `sounding`).
+   *  Block-rate; no allocation, no pow, no per-sample trig. */
+  splatBurstArrival(re, im, tHop, tEnd, bStart, bLen, dE, anchor, freq, amp0,
+    envO, sat, tableA, tableB, tf) {
+    const blockT = BLOCK / sampleRate;
+    const bStartE = bStart + dE; // the arrival window is the emission
+    // window translated by the flight time: [bStart + dE, bStart + bLen + dE]
+    let amp;
+    let gker;
+    let shift = 0;
+    if (bLen < blockT) {
+      // short burst = one grain: single designated-hop splat, the
+      // mid-strip test now applied to the ARRIVAL midpoint
+      const pc = (bStartE + bLen / 2 - tHop) * sampleRate;
+      if (pc < HOP / 2 || pc >= HOP / 2 + HOP) return false;
+      const envRMS = OceanTwinProcessor.envSegRMS(envO, 0, 1);
+      amp = amp0 * envRMS * Math.SQRT2
+        * Math.sqrt(bLen / blockT) * GRAIN_COLA * BED_CAL;
+      let bi = Math.round(Math.log2(bLen * sampleRate)) - GRAIN_LOG2_MIN;
+      if (bi < 0) bi = 0;
+      else if (bi >= GRAIN_BUCKETS.length) bi = GRAIN_BUCKETS.length - 1;
+      gker = this.grainKers[bi];
+      shift = pc - BLOCK / 2;
+    } else {
+      // long burst: interior hops window-limited with COLA, edge slices
+      // as grains of the overlap's duration — all clocks arrival-shifted
+      const s0 = Math.max(bStartE, tHop);
+      const s1 = Math.min(bStartE + bLen, tEnd);
+      if (s1 <= s0) return false;
+      const a0 = (s0 - bStartE) / bLen;
+      const a1 = (s1 - bStartE) / bLen;
+      const envRMS = OceanTwinProcessor.envSegRMS(envO, a0, a1);
+      const overlap = (s1 - s0) / blockT;
+      amp = amp0 * envRMS * Math.SQRT2 * Math.sqrt(overlap) * BED_CAL;
+      if (bStartE <= tHop && bStartE + bLen >= tEnd) {
+        gker = this.ker; // interior hop: window-limited, COLA carries env
+      } else {
+        let bi = Math.round(Math.log2((s1 - s0) * sampleRate)) - GRAIN_LOG2_MIN;
+        if (bi < 0) bi = 0;
+        else if (bi >= GRAIN_BUCKETS.length) bi = GRAIN_BUCKETS.length - 1;
+        gker = this.grainKers[bi];
+        const pc = ((s0 + s1) / 2 - tHop) * sampleRate;
+        shift = pc - BLOCK / 2;
+        amp *= this.win[Math.min(BLOCK - 1, pc | 0)] * GRAIN_COLA;
+      }
+    }
+    if (amp <= 0.0002) return false;
+    const anchorE = anchor + dE;
+    const bin = (freq * BLOCK) / sampleRate;
+    const ph = (2 * Math.PI * freq * (tHop - anchorE) - Math.PI / 2) % (2 * Math.PI);
+    // same two-wavetable 1/peak blend as the off path
+    const invPA = this.wheelInvPeak[tableA];
+    const invPB = this.wheelInvPeak[tableB];
+    const fc = (1 - sat) + sat * ((1 - tf) * invPA + tf * invPB);
+    splatBlob(re, im, BLOCK, bin, amp * fc, ph, gker, shift);
+    if (sat > 0.01) {
+      for (let side = 0; side < 2; side++) {
+        const rec = RECIPES[side === 0 ? tableA : tableB];
+        const w = sat * (side === 0 ? (1 - tf) * invPA : tf * invPB);
+        for (let q = 1; q < rec.length; q++) { // q=0 is the fundamental
+          const [hh, ha] = rec[q];
+          const fb = (freq * hh * BLOCK) / sampleRate;
+          if (fb >= BLOCK / 2 - KERNEL_HW) break;
+          const pa = amp * w * ha;
+          if (pa <= 0.000002) continue;
+          // partial h rides the SAME displaced anchor: the whole
+          // spectrum of the grain arrives together
+          const php = (2 * Math.PI * freq * hh * (tHop - anchorE) - Math.PI / 2) % (2 * Math.PI);
+          splatBlob(re, im, BLOCK, fb, pa, php, gker, shift);
+        }
+      }
+    }
+    return true;
   }
 
   synthesizeHop() {
@@ -1060,6 +1331,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
         pz = o.centerZ + (pz - o.centerZ) * f;
       }
     }
+    // raw landing to scratch BEFORE spatialize: transport reads the
+    // position itself (per-ear ranges), not the collapsed pan/dist gains
+    s.px = px;
+    s.py = py;
+    s.pz = pz;
     this.spatialize(px, py, pz, spat);
 
     // color -> timbre, mirroring the GPU blend chain
@@ -1095,6 +1371,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
     s.capBright = 0.35 + 0.65 * val;
     const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
     s.capAmp = 0.13 * s.capBright * mag * o.gain * bassBoost(s.capFreq);
+    // transport's emission loudness: the same calibration WITHOUT the
+    // spatialize() magnitude — 1/max(rE, NEAR_CLAMP) replaces it per
+    // ear. A separate full expression (not capAmp/mag) so the off
+    // path's capAmp rounding stays bit-identical.
+    s.capAmp0 = 0.13 * s.capBright * o.gain * bassBoost(s.capFreq);
     s.capPanL = bassMono(spat[0] / mag, s.capFreq);
     s.capPanR = bassMono(spat[1] / mag, s.capFreq);
   }
@@ -1158,10 +1439,14 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
       this.spatialize(s.fx, s.fy, s.fz, spat);
       const mag = Math.sqrt(spat[0] * spat[0] + spat[1] * spat[1]) || 1;
       s.amp = 0.1 * bright * mag * bassBoost(s.freeFreq);
+      // transport's emission loudness, sans spatialize() magnitude
+      // (separate expression: the off path's amp rounding is sacred)
+      s.amp0 = 0.1 * bright * bassBoost(s.freeFreq);
       s.panL = bassMono(spat[0] / mag, s.freeFreq);
       s.panR = bassMono(spat[1] / mag, s.freeFreq);
     } else {
       s.amp = 0;
+      s.amp0 = 0;
     }
   }
 
