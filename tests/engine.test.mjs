@@ -724,9 +724,13 @@ test('Doppler: an approaching listener hears the textbook ratio', async () => {
   // listener (measured sweep: full rms out to r=21m, a gradual ramp
   // 22→24m, exact silence ≥25m). That boundary is the bed's WIDENED
   // ENUMERATION horizon, not this file's amp ≤ 2e-4 splat floor —
-  // verified by falsification: quadrupling the object's gain leaves the
-  // ramp bit-identical at every r (an amplitude floor would shift
-  // outward with gain). Arithmetic: lookback DMAX + 0.6·tau = 42ms,
+  // verified by falsification: the EXACT-SILENCE cutoff at ≥25m stays
+  // put under a quadrupled object gain (an amplitude floor would shift
+  // outward with gain) — that cutoff is the decisive datum. The 22–24m
+  // ramp also measured no visible change, but level comparisons there
+  // pass through the master limiter's gain-riding, so ramp invariance
+  // alone would be confounded evidence and is not what the attribution
+  // rests on. Arithmetic: lookback DMAX + 0.6·tau = 42ms,
   // plus up to one cycle (20ms) from the enumeration's floor()
   // truncation, plus the designated-hop mid-strip allowance (~10ms)
   // ≈ 72ms ≈ 24.7m at c=343 — the measured hard cutoff at 25m to the

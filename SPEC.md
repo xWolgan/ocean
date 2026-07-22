@@ -325,8 +325,11 @@ constant below exactly as it does to the free/object hash salts.
   transport-off at matched settings: the old path split a fixed pan
   power budget across both ears, where transport gives each ear the
   full `1/r` field pressure independently (the physically correct
-  behavior for two independent ears, not a bug) — the `gain` dial
-  absorbs the difference; there is no compensating attenuation baked in.
+  behavior for two independent ears, not a bug). The on-vs-off delta is
+  geometry-dependent — `1/r` diverges from the old rolloff more toward
+  far corners, so ≈3 dB is the reference-scene measurement, not a
+  constant — and the `gain` dial absorbs it; there is no compensating
+  attenuation baked in.
 - **Sub-Schroeder claim.** `f_Schroeder = 2000·√(RT60/V) ≈ 120 Hz` for
   this box (V ≈ 108 m³, RT60 = 0.4 s). Below that floor a real room's
   behavior is modal, not statistical — the engine does NOT claim modal

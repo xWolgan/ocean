@@ -281,8 +281,10 @@ where.
   r0 {8, 8.5, 9} × dur {0.6, 0.7} × six slices: error +0.0024…+0.0030 in
   every combination; chosen slice +0.0025; tolerance 0.006 unweakened).
   The boundary's cause was pinned by falsification, correcting the
-  review's own attribution: 4× object gain leaves the 22–24 m ramp
-  bit-identical (so NOT the amp ≤ 2e-4 splat floor) — it is the widened
+  review's own attribution: the exact-silence cutoff at ≥25 m stays put
+  under 4× object gain (so NOT the amp ≤ 2e-4 splat floor; the 22–24 m
+  ramp comparison agreed but is limiter-confounded, and is only
+  supporting evidence) — it is the widened
   enumeration horizon, DMAX + 0.6·tau (42 ms) + up to one cycle from the
   floor() truncation (20 ms) + the designated-hop mid-strip (~10 ms)
   ≈ 72 ms ≈ 24.7 m, matching the measured hard cutoff at 25 m to the

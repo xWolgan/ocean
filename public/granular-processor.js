@@ -100,10 +100,14 @@ const DMAX = 0.09; // s, max flight time the bed enumerates for a
 // mid-strip (~10 ms — itself ignoring the burst's own bLen/2 half-width,
 // a sub-ms term at this tau/duty and not re-derived further since the
 // RAMP's existence, not this last term, is what's asserted) ≈ 132 ms ≈
-// 45.3 m; the ramp is hop/cycle alignment, verified gain-invariant at
-// DMAX=0.03 (so NOT the amp ≤ 2e-4 splat floor) and unchanged in kind at
-// 0.09, just wider. Harmless for in-box listeners; flagged for the
-// Task 8 docs pass.
+// 45.3 m; the ramp is hop/cycle alignment. The attribution (enumeration
+// horizon, NOT the amp ≤ 2e-4 splat floor) rests on the EXACT-SILENCE
+// cutoff: rms exactly 0 beyond the horizon, unmoved by a 4× gain boost
+// at DMAX=0.03 — an amplitude floor would migrate outward with gain.
+// The ramp-shape comparison under boosted gain agreed but is only
+// supporting evidence (the master limiter's gain-riding confounds level
+// comparisons there). Unchanged in kind at 0.09, just wider. Harmless
+// for in-box listeners; flagged for the Task 8 docs pass.
 // Task 6 salience budget: any isHero[k] OR a top-IMAGE_TOP_K scoreAmp[k]
 // gets 6 wall-image splats (see computeImageBudget — the same top-K scan
 // pattern as selectHeroes, run over scoreAmp rather than heroScore).
@@ -2615,6 +2619,8 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
           // silently drop a near voice whose rendered amplitude
           // emitAmp·iE is up to 4× larger — the same under-skip-only
           // bound the outer fast path uses.
+          let xL = 0;
+          let xR = 0;
           if (emitAmp * invNear > 0.0002) {
             const hg = this.heroGain[k];
             // ear L: envelope age from tL = t − dL (aa<0 → not yet arrived,
@@ -2625,7 +2631,6 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
             const aaL = captured
               ? (tL * v.asgInvTau + v.asgPhi - v.asgGen) / 0.6
               : (tL * invLFree + v.phi - v.gen - v.offN) / v.durN;
-            let xL = 0;
             if (aaL > 0 && aaL < 1) {
               const env = lutC.lut[(aaL * ENV_LUT_SIZE) | 0];
               if (env > 0.0001) {
@@ -2636,18 +2641,11 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
                 xL = osc * env * emitAmp * iL * hg;
               }
             }
-            // Task 4: the one-pole is stepped EVERY sample this voice is
-            // active (even when xL is 0) so its memory decays honestly
-            // through silence instead of freezing and leaking into a
-            // later, unrelated grain.
-            this.heroLpL[k] = (1 - aHL) * xL + aHL * this.heroLpL[k];
-            outL[s] += this.heroLpL[k];
             // ear R
             const tR = t - dR;
             const aaR = captured
               ? (tR * v.asgInvTau + v.asgPhi - v.asgGen) / 0.6
               : (tR * invLFree + v.phi - v.gen - v.offN) / v.durN;
-            let xR = 0;
             if (aaR > 0 && aaR < 1) {
               const env = lutC.lut[(aaR * ENV_LUT_SIZE) | 0];
               if (env > 0.0001) {
@@ -2658,9 +2656,19 @@ class OceanTwinProcessor extends AudioWorkletProcessor {
                 xR = osc * env * emitAmp * iR * hg;
               }
             }
-            this.heroLpR[k] = (1 - aHR) * xR + aHR * this.heroLpR[k];
-            outR[s] += this.heroLpR[k];
           }
+          // Task 4 (hoisted OUT of the amplitude gate at the final
+          // review, so this contract is actually true): the one-pole is
+          // stepped EVERY sample this voice is in the hero loop — even
+          // through the gate's silence — so its memory decays honestly
+          // instead of freezing and leaking into a later, unrelated
+          // grain, and the decaying tail keeps reaching the output.
+          // Cost: 2 mul-adds per ear on gated samples; a truly idle
+          // voice never gets here (the outer fast path skips it).
+          this.heroLpL[k] = (1 - aHL) * xL + aHL * this.heroLpL[k];
+          outL[s] += this.heroLpL[k];
+          this.heroLpR[k] = (1 - aHR) * xR + aHR * this.heroLpR[k];
+          outR[s] += this.heroLpR[k];
           const hg0 = this.heroGain[k];
           this.heroGain[k] = hg0 < gTarget
             ? Math.min(gTarget, hg0 + gStep)
