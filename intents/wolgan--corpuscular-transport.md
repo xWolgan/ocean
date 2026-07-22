@@ -273,3 +273,19 @@ where.
   + legacy check clean; throughput 4.3–5.2× realtime across repeated
   runs (Doppler adds only per-generation multiplies), comfortably above
   the suite's ≥4× gate and the plan's ≥3× floor.
+- Task 5 fix round (review): the r0=35 test geometry passed only because
+  the moving listener crossed a ~21–25 m audibility boundary mid-render —
+  a non-Doppler threshold. Reworked to a within-horizon geometry:
+  r0 = 8.5 m, 0.7 s render (r(t) ∈ [1.5, 8.5] m, no crossing, always
+  audible), trim chosen by measurement and documented in-test (sweep over
+  r0 {8, 8.5, 9} × dur {0.6, 0.7} × six slices: error +0.0024…+0.0030 in
+  every combination; chosen slice +0.0025; tolerance 0.006 unweakened).
+  The boundary's cause was pinned by falsification, correcting the
+  review's own attribution: 4× object gain leaves the 22–24 m ramp
+  bit-identical (so NOT the amp ≤ 2e-4 splat floor) — it is the widened
+  enumeration horizon, DMAX + 0.6·tau (42 ms) + up to one cycle from the
+  floor() truncation (20 ms) + the designated-hop mid-strip (~10 ms)
+  ≈ 72 ms ≈ 24.7 m, matching the measured hard cutoff at 25 m to the
+  meter; the ramp is hop/cycle alignment. Documented at the DMAX
+  constant (Task 6's 0.03→0.09 moves this horizon to ~45 m — flagged for
+  the Task 8 docs pass). Suite 25/25 green; tsc + legacy clean.

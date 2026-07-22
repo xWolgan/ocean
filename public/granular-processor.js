@@ -78,6 +78,15 @@ const AIR_R_MAX = 12; // m — covers the box diagonal + first-order image paths
 const DMAX = 0.03; // s, max direct-path flight time the bed enumerates for
 // (≈10.3 m at c=343 — beyond the box diagonal from any in-box listener;
 // Task 6 raises this to 0.09 to cover first-order image paths)
+// NOTE (Task 5 review): "beyond the box diagonal" understates the AUDIBLE
+// range of loud coherent sources — a sync=1 captured object (tau 0.02)
+// measures full strength out to ~21 m, fading to silence over 22–25 m.
+// That boundary IS this constant's doing, widened: lookback DMAX+0.6·tau
+// (42 ms) + up to one cycle from the enumeration's floor() truncation
+// (20 ms) + the designated-hop mid-strip (~10 ms) ≈ 72 ms ≈ 24.7 m; the
+// ramp is hop/cycle alignment, verified gain-invariant (so NOT the
+// amp ≤ 2e-4 splat floor). Harmless for in-box listeners; flagged for
+// the Task 8 docs pass.
 
 const POOL = 256;
 // per-voice frozen-radius ring slots (transport): must cover the widest

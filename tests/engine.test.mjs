@@ -715,54 +715,59 @@ test('Doppler: an approaching listener hears the textbook ratio', async () => {
   const obj = { ...GAP_OBJ, tintR: 0.9, tintG: 0.2, tintB: 0.9, sync: 1 };
   const v = 10; // m/s, listener moving toward the object along -z
 
-  // Distance choice for the MOVING render (deliberately NOT this file's
-  // usual r=3.0m): at v=10 m/s over the full 3s render the listener
-  // covers 30m. Starting at r=3.0m (like the static-listener tests above)
-  // the listener would fly PAST the object at t=0.3s and spend the
-  // remaining 2.7s RECEDING — a REDSHIFT, not the approach ratio this
-  // test targets — squarely inside the tail window an FFT needs for
-  // frequency resolution. Starting at r0=35m keeps r(t) = 35 − 10t
-  // monotonically decreasing and always positive (5m at t=3s) — one
-  // stable "approaching" regime for the WHOLE render, with the
-  // strongest, closest-range signal landing right where the FFT tail
-  // samples it. Only the LISTENER's start point moves for `appr`; the
-  // object stays exactly where GAP_OBJ puts it (its capture reach is
-  // about the particle field, unaffected by how far the listener starts).
-  const r0 = 35;
+  // Geometry (reworked after review): the moving listener starts at
+  // r0 = 8.5 m and the render is 0.7 s, so r(t) = 8.5 − 10t stays inside
+  // [1.5, 8.5] m for the whole render — strictly positive (no crossing:
+  // at r=3.0m start the listener would fly PAST the object at t=0.3s and
+  // redshift for the rest of the render) AND strictly within the range
+  // where the bed renders this object at full strength with a STATIC
+  // listener (measured sweep: full rms out to r=21m, a gradual ramp
+  // 22→24m, exact silence ≥25m). That boundary is the bed's WIDENED
+  // ENUMERATION horizon, not this file's amp ≤ 2e-4 splat floor —
+  // verified by falsification: quadrupling the object's gain leaves the
+  // ramp bit-identical at every r (an amplitude floor would shift
+  // outward with gain). Arithmetic: lookback DMAX + 0.6·tau = 42ms,
+  // plus up to one cycle (20ms) from the enumeration's floor()
+  // truncation, plus the designated-hop mid-strip allowance (~10ms)
+  // ≈ 72ms ≈ 24.7m at c=343 — the measured hard cutoff at 25m to the
+  // meter; the 22–24m ramp is hop/cycle phase alignment (some designated
+  // hops reach their cycle, others don't). The first landing of this
+  // test started at r0=35m — inside that silent zone — and only produced
+  // sound because the moving listener crossed the ~21–25m horizon
+  // mid-render: a non-Doppler mechanism this test never meant to depend
+  // on, and one Task 6's DMAX widening (0.03→0.09 moves the horizon to
+  // ~45m) WOULD have silently shifted. Staying within the always-audible
+  // range makes the measurement depend on nothing but the Doppler math.
+  const r0 = 8.5;
   const z0 = obj.centerZ + r0;
   const moving = {
     ...BASE_PARAMS, particleCount: 256, heroCount: 0, transport: 1,
     objects: [obj], listener: [0, 1.7, z0], listenerVel: [0, 0, -v],
   };
   globalThis.currentTime = 0;
-  // `still` is the UNSHIFTED-carrier reference: since capFreq depends
-  // only on hue (position-independent), it is measured at this file's
-  // usual r=3.0m geometry — same object, zero velocity, no Doppler — not
-  // at r0=35m (which would put the static case far enough out that its
-  // 1/max(r,NEAR_CLAMP) amplitude falls under the splat audibility floor
-  // and renders silence, measured: rms 0 at r=35m with no motion).
-  const still = render(new Engine(), 3.0, {
+  // `still` is the UNSHIFTED-carrier reference: capFreq depends only on
+  // hue (position-independent), so it is measured at this file's usual
+  // r=3.0m geometry — same object, zero velocity, no Doppler — over a
+  // 1s render, peak taken from the steady tail slice.
+  const still = render(new Engine(), 1.0, {
     ...moving, listener: [0, 1.7, 4.4], listenerVel: [0, 0, 0],
-  }).L.slice(48000);
+  }).L;
   globalThis.currentTime = 0;
   // onQuantum drives the SAME motion the constant listenerVel declares
   // (128 samples/quantum at 48 kHz — the harness's process() quantum
   // size) — a mismatch here would make the frozen rdot (derived from
   // listenerVel) disagree with the actual geometry (derived from
   // listener), corrupting the measurement.
-  const appr = render(new Engine(), 3.0, moving, (q) => ({
+  const appr = render(new Engine(), 0.7, moving, (q) => ({
     listener: [0, 1.7, z0 - (q * 128 / 48000) * v], listenerVel: [0, 0, -v],
-  })).L.slice(48000);
+  })).L;
 
-  // Parabolic-interpolated FFT peak: an 8192-pt Hann-windowed slice from
-  // the TAIL of the (already 1s-trimmed) buffer — steady state, well
-  // inside the monotonic-approach regime the distance choice above
-  // guarantees for the entire render.
-  const peakF = (buf) => {
+  // Parabolic-interpolated FFT peak of an 8192-pt Hann-windowed slice
+  // starting at `off`.
+  const peakF = (buf, off) => {
     const N = 8192;
     const fft = makeFFT(N);
     const win = hannWindow(N);
-    const off = buf.length - N;
     const re = new Float32Array(N);
     const im = new Float32Array(N);
     for (let i = 0; i < N; i++) re[i] = buf[off + i] * win[i];
@@ -781,7 +786,17 @@ test('Doppler: an approaching listener hears the textbook ratio', async () => {
     const delta = denom !== 0 ? 0.5 * (y0 - y2) / denom : 0;
     return ((peakBin + delta) * 48000) / N;
   };
-  const ratio = peakF(appr) / peakF(still);
+  // Slice choice for `appr`, by measurement (not assumption): offset
+  // 12000 → t = [0.250, 0.421] s, r = [6.0, 4.29] m — past the OLA/ring
+  // warmup (~0.1 s) and object-cycle settle, entirely inside the
+  // always-audible approach regime above. Measured margin across trims
+  // and geometries (sweep over r0 ∈ {8, 8.5, 9} m, duration ∈ {0.6,
+  // 0.7} s, six slice offsets from t=0.215 to the tail): ratio error
+  // spanned +0.0024 to +0.0030 in EVERY combination — same sign, same
+  // magnitude, > 2× margin under the 0.006 tolerance; this offset
+  // measured +0.0025. `still` is sliced at its steady tail (last 8192
+  // of the 1 s render, t = [0.829, 1.0] s).
+  const ratio = peakF(appr, 12000) / peakF(still, still.length - 8192);
   // textbook Doppler ratio for a listener approaching a stationary source
   // at v m/s in air (SPEED_OF_SOUND = 343 m/s): fE/f = 1 + v/c
   const expected = 1 + v / 343;
