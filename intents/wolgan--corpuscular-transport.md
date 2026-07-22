@@ -1,4 +1,4 @@
-# Corpuscular transport: the ear gets a lens
+﻿# Corpuscular transport: the ear gets a lens
 
 **Who:** Wolgan (branch `wolgan/corpuscular-transport`, 2026-07-19)
 
@@ -6,13 +6,13 @@
 
 A parallel conceptual session (archived verbatim in
 `docs/concepts/2026-07-corpuscular-sound-rendering.md`) proposed rendering
-sound with light-rendering's machinery: emission atoms → transport
-samples → per-ear deposits, with closed-form propagation. Juxtaposed
+sound with light-rendering's machinery: emission atoms â†’ transport
+samples â†’ per-ear deposits, with closed-form propagation. Juxtaposed
 against the freshly-merged spectral-tile engine, the evaluation
 (recorded in the spec) found the two are not rivals: the briefing
 specifies the TRANSPORT rung our engine skips entirely; our engine is
 the measured-cheap DEPOSIT backend the briefing would have to reinvent
-at OCEAN's scale. Today space is rendered as loudness, never as time —
+at OCEAN's scale. Today space is rendered as loudness, never as time â€”
 no flight delay, no interaural time difference, no per-ear
 interference, no Doppler, no room. The box has walls for the eyes and
 anechoic void for the ears.
@@ -24,12 +24,12 @@ deposit gains a per-ear arrival time (r/343), true 1/r spreading, air
 absorption, Doppler (exact on heroes, block-rate on the bed),
 image-source early reflections on a salience budget, and a shared
 Sabine-matched tail. All transport terms are per-particle, state-free,
-closed-form — designed from the start to transplant line-for-line into
+closed-form â€” designed from the start to transplant line-for-line into
 the Stage-2 GPU splat shader when the readback gate opens. The binding
 design rule is the coherence filter: graphics tricks that respect phase
 transfer honestly (splatting, instancing, deferred accumulation,
 masking-as-occlusion-culling); tricks built on incoherent averaging are
-refused — the tile carries complex amplitude end to end.
+refused â€” the tile carries complex amplitude end to end.
 
 ## What it should feel like
 
@@ -43,4 +43,7 @@ where.
 
 - Branch created; briefing archived; spec written:
   `docs/superpowers/specs/2026-07-19-corpuscular-transport-design.md`.
-- Awaiting Wolgan's spec review before the implementation plan.
+- Spec approved 2026-07-22; implementation plan written:
+  docs/superpowers/plans/2026-07-22-corpuscular-transport.md (8 tasks).
+- Execution in progress (subagent pipeline).
+
